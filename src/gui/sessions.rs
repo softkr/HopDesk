@@ -39,6 +39,8 @@ pub struct FailureInfo {
     pub detail: String,
     /// The fix is to clear the pinned key/certificate.
     pub key_changed: bool,
+    /// Retrying unchanged would fail again: the fix is in the connection settings.
+    pub fix_in_settings: bool,
     /// Failed after the jump host was reached (between jump host and remote PC).
     pub at_remote: bool,
 }
@@ -269,6 +271,13 @@ fn explain(detail: &str, log: &[String], state: &State) -> FailureInfo {
         hint: hint.to_owned(),
         detail: detail.trim().to_owned(),
         key_changed,
+        fix_in_settings: has("no stored")
+            || has("load private key")
+            || has("jump host authentication failed")
+            || (!key_changed
+                && !has("SSH connect to jump host")
+                && !has("direct-tcpip")
+                && (has("logon") || has("credssp") || has("authentication") || has("password"))),
         at_remote: matches!(state, State::Rdp | State::Connected | State::Reconnecting) && !has("SSH HOST KEY CHANGED"),
     }
 }

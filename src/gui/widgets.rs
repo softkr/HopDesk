@@ -4,7 +4,7 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Frame, Margin, Response, RichText, Sense, Stroke, TextEdit, Ui, Vec2,
 };
 
-use super::theme::{Bold as _, CARD_RADIUS, Palette, RADIUS, bold_family, palette};
+use super::theme::{Bold as _, CARD_RADIUS, Palette, RADIUS, TITLE_SIZE, bold_family, palette};
 
 /// Raised container with a border.
 pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
@@ -37,7 +37,7 @@ pub fn banner<R>(ui: &mut Ui, fill: Color32, stroke: Color32, add_contents: impl
 
 pub fn section_title(ui: &mut Ui, title: &str, help: Option<&str>) {
     let pal = palette(ui);
-    ui.label(RichText::new(title).size(15.0).bold().color(pal.text));
+    ui.label(RichText::new(title).size(TITLE_SIZE).bold().color(pal.text));
     if let Some(help) = help {
         ui.label(RichText::new(help).small().color(pal.text_weak));
     }
@@ -98,20 +98,21 @@ pub fn ghost_button(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> Response 
 }
 
 const AVATAR_COLORS: [Color32; 8] = [
-    Color32::from_rgb(0x25, 0x63, 0xEB),
-    Color32::from_rgb(0x7C, 0x3A, 0xED),
-    Color32::from_rgb(0xDB, 0x27, 0x77),
-    Color32::from_rgb(0xEA, 0x58, 0x0C),
-    Color32::from_rgb(0x05, 0x96, 0x69),
-    Color32::from_rgb(0x08, 0x91, 0xB2),
-    Color32::from_rgb(0x65, 0x73, 0x8B),
-    Color32::from_rgb(0xCA, 0x8A, 0x04),
+    Color32::from_rgb(0x19, 0x40, 0x51),
+    Color32::from_rgb(0x18, 0x64, 0x72),
+    Color32::from_rgb(0x3D, 0x6C, 0x8E),
+    Color32::from_rgb(0x5B, 0x62, 0x8F),
+    Color32::from_rgb(0x7A, 0x5C, 0x86),
+    Color32::from_rgb(0x8A, 0x5A, 0x5A),
+    Color32::from_rgb(0x8C, 0x6D, 0x3F),
+    Color32::from_rgb(0x4E, 0x7A, 0x5E),
 ];
 
 /// Circle with the first letter of `name`, colored by a stable hash of the name.
 pub fn paint_avatar(ui: &Ui, center: egui::Pos2, radius: f32, name: &str) {
-    let hash = name.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
-    let color = AVATAR_COLORS[hash as usize % AVATAR_COLORS.len()];
+    // FNV-1a spreads similar names over the palette better than a plain multiply-add.
+    let hash = name.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
+    let color = AVATAR_COLORS[(hash >> 16) as usize % AVATAR_COLORS.len()];
     ui.painter().circle_filled(center, radius, color);
     let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
     ui.painter().text(
@@ -130,7 +131,7 @@ pub fn avatar(ui: &mut Ui, size: f32, name: &str) {
 
 /// Pill with a colored dot and text, sized to its content.
 pub fn status_pill(ui: &mut Ui, color: Color32, text: &str) -> Response {
-    let font = FontId::new(12.0, bold_family());
+    let font = FontId::new(13.0, bold_family());
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
     let (pad_x, pad_y, dot, gap) = (10.0, 5.0, 8.0, 6.0);
     let size = Vec2::new(pad_x * 2.0 + dot + gap + galley.size().x, pad_y * 2.0 + galley.size().y);
@@ -158,17 +159,47 @@ pub fn field<R>(ui: &mut Ui, label: &str, error: Option<&str>, add_field: impl F
     .inner
 }
 
-/// Styled single-line text input; red border when `invalid`.
-pub fn text_input<'t>(ui: &Ui, value: &'t mut String, hint: &str, width: f32, invalid: bool) -> TextEdit<'t> {
+/// Styled single-line text input; red outline when `invalid`.
+pub struct Input<'t> {
+    edit: TextEdit<'t>,
+    invalid: bool,
+}
+
+impl<'t> Input<'t> {
+    pub fn password(mut self, password: bool) -> Self {
+        self.edit = self.edit.password(password);
+        self
+    }
+
+    pub fn id(mut self, id: egui::Id) -> Self {
+        self.edit = self.edit.id(id);
+        self
+    }
+}
+
+impl egui::Widget for Input<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let danger = palette(ui).danger;
+        let response = ui.add(self.edit);
+        if self.invalid && !response.has_focus() {
+            ui.painter().rect_stroke(
+                response.rect,
+                CornerRadius::same(RADIUS),
+                Stroke::new(1.5, danger),
+                egui::StrokeKind::Inside,
+            );
+        }
+        response
+    }
+}
+
+pub fn text_input<'t>(ui: &Ui, value: &'t mut String, hint: &str, width: f32, invalid: bool) -> Input<'t> {
     let pal = palette(ui);
-    let mut edit = TextEdit::singleline(value)
-        .hint_text(RichText::new(hint).color(pal.text_weak.gamma_multiply(0.8)))
+    let edit = TextEdit::singleline(value)
+        .hint_text(RichText::new(hint).color(pal.text_weak))
         .desired_width(width)
         .margin(Margin::symmetric(10, 7));
-    if invalid {
-        edit = edit.background_color(pal.danger_soft);
-    }
-    edit
+    Input { edit, invalid }
 }
 
 /// Two or more mutually exclusive options shown as one segmented control.

@@ -259,7 +259,7 @@ impl Form {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             ui.vertical(|ui| {
-                ui.heading(RichText::new(if self.is_new() { "새 연결" } else { "연결 편집" }).bold());
+                ui.label(RichText::new(if self.is_new() { "새 연결" } else { "연결 편집" }).size(super::theme::HEADING_SIZE).bold());
                 ui.label(
                     RichText::new("SSH 점프 호스트를 거쳐 원격 Windows PC에 접속합니다.").color(pal.text_weak),
                 );
@@ -313,7 +313,7 @@ impl Form {
                 host_port_row(
                     ui,
                     full,
-                    (&mut self.jump_host, "bastion.example.com", err(Field::JumpHost)),
+                    (&mut self.jump_host, "예: bastion.example.com", err(Field::JumpHost)),
                     (&mut self.jump_port, err(Field::JumpPort)),
                 );
                 let edit = text_input(ui, &mut self.jump_user, "예: ubuntu", full, err(Field::JumpUser).is_some());
@@ -329,14 +329,14 @@ impl Form {
                 if self.auth == Auth::Key {
                     field(ui, "개인 키 파일", err(Field::KeyPath), |ui| {
                         input_row(ui, full, |ui| {
-                            if ui.button("찾아보기…").clicked()
+                            if ui.button("찾아보기...").clicked()
                                 && let Some(path) = pick_key_file(&self.key_path)
                             {
                                 self.key_path = display_path(&path);
                             }
                             let invalid = err(Field::KeyPath).is_some();
                             let w = ui.available_width();
-                            ui.add(text_input(ui, &mut self.key_path, "~/.ssh/id_ed25519", w, invalid));
+                            ui.add(text_input(ui, &mut self.key_path, "예: ~/.ssh/id_ed25519", w, invalid));
                         });
                     });
                 }
@@ -367,12 +367,12 @@ impl Form {
                 host_port_row(
                     ui,
                     full,
-                    (&mut self.target_host, "10.0.0.5", err(Field::TargetHost)),
+                    (&mut self.target_host, "예: 10.0.0.5", err(Field::TargetHost)),
                     (&mut self.target_port, err(Field::TargetPort)),
                 );
                 ui.horizontal(|ui| {
                     let half = (full - 8.0) / 2.0;
-                    let edit = text_input(ui, &mut self.rdp_user, "Administrator", half, err(Field::RdpUser).is_some());
+                    let edit = text_input(ui, &mut self.rdp_user, "예: Administrator", half, err(Field::RdpUser).is_some());
                     field(ui, "Windows 사용자 이름", err(Field::RdpUser), |ui| ui.add(edit));
                     let edit = text_input(ui, &mut self.domain, "선택 사항", half, false);
                     field(ui, "도메인", None, |ui| ui.add(edit));

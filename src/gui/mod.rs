@@ -348,7 +348,7 @@ impl Launcher {
     fn sidebar(&mut self, ui: &mut Ui) {
         let pal = palette(ui);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("HopDesk").size(17.0).bold().color(pal.text));
+            ui.label(RichText::new("HopDesk").size(theme::TITLE_SIZE).bold().color(pal.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let add = egui::Button::new(RichText::new("+").size(18.0)).min_size(Vec2::new(30.0, 30.0));
                 if ui.add(add).on_hover_text(format!("새 연결  {}", platform::shortcut("N"))).clicked() {
@@ -440,10 +440,11 @@ impl Launcher {
             widgets::icon(ui, widgets::Icon::Monitor, 64.0, pal.text_weak);
             ui.add_space(8.0);
             if first_run {
-                ui.label(RichText::new("첫 연결을 만들어 보세요").size(22.0).bold().color(pal.text));
-                ui.add_space(2.0);
+                ui.label(RichText::new("첫 연결을 만들어 보세요").size(theme::HEADING_SIZE).bold().color(pal.text));
+                ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!("SSH 점프 호스트를 거쳐 원격 Windows PC에 안전하게 접속합니다.\n비밀번호는 {}에 저장됩니다.", platform::SECRET_STORE))
+                        .line_height(Some(22.0))
                         .color(pal.text_weak),
                 );
                 ui.add_space(16.0);
@@ -451,7 +452,7 @@ impl Launcher {
                     self.navigate(Nav::New);
                 }
             } else {
-                ui.label(RichText::new("왼쪽 목록에서 연결을 선택하세요").size(17.0).color(pal.text_weak));
+                ui.label(RichText::new("왼쪽 목록에서 연결을 선택하세요").size(theme::TITLE_SIZE).color(pal.text_weak));
             }
         });
     }
@@ -607,11 +608,18 @@ fn list_row(ui: &mut Ui, pal: &Palette, p: &Profile, selected: bool, state: Opti
     let avatar_c = Pos2::new(rect.left() + 10.0 + avatar_r, rect.center().y);
     widgets::paint_avatar(ui, avatar_c, avatar_r, &p.name);
 
+    // Shape differs per state, so it does not rely on color alone.
+    #[derive(Clone, Copy)]
+    enum Mark {
+        Dot,
+        Ring,
+        Alert,
+    }
     let dot = state.map(|s| match s {
-        State::Connected => (pal.success, "연결됨"),
-        State::Failed(_) => (pal.danger, "실패"),
-        State::Reconnecting => (pal.warning, "재연결 중"),
-        _ => (pal.accent, "연결 중"),
+        State::Connected => (pal.success, "연결됨", Mark::Dot),
+        State::Failed(_) => (pal.danger, "연결 실패", Mark::Alert),
+        State::Reconnecting => (pal.warning, "다시 연결하는 중", Mark::Ring),
+        _ => (pal.accent, "연결하는 중", Mark::Ring),
     });
     let text_left = avatar_c.x + avatar_r + 10.0;
     let text_right = rect.right() - if dot.is_some() { 26.0 } else { 10.0 };
@@ -619,16 +627,28 @@ fn list_row(ui: &mut Ui, pal: &Palette, p: &Profile, selected: bool, state: Opti
 
     let name = single_line(ui, &p.name, FontId::new(14.0, bold_family()), pal.text, max_w);
     let sub_text = format!("{}@{}", p.target.user, p.target.host);
-    let sub = single_line(ui, &sub_text, FontId::proportional(12.0), pal.text_weak, max_w);
+    let sub = single_line(ui, &sub_text, FontId::proportional(13.0), pal.text_weak, max_w);
     let total = name.size().y + 2.0 + sub.size().y;
     let top = rect.center().y - total / 2.0;
     ui.painter().galley(Pos2::new(text_left, top), name.clone(), pal.text);
     ui.painter().galley(Pos2::new(text_left, top + name.size().y + 2.0), sub, pal.text_weak);
 
-    if let Some((color, label)) = dot {
-        let c = Pos2::new(rect.right() - 14.0, rect.center().y);
-        ui.painter().circle_filled(c, 4.5, color);
-        let hit = Rect::from_center_size(c, Vec2::splat(14.0));
+    if let Some((color, label, mark)) = dot {
+        let c = Pos2::new(rect.right() - 15.0, rect.center().y);
+        match mark {
+            Mark::Dot => {
+                ui.painter().circle_filled(c, 5.0, color);
+            }
+            Mark::Ring => {
+                ui.painter().circle_stroke(c, 4.5, Stroke::new(2.0, color));
+            }
+            Mark::Alert => {
+                ui.painter().circle_filled(c, 7.0, color);
+                let font = FontId::new(11.0, bold_family());
+                ui.painter().text(c, Align2::CENTER_CENTER, "!", font, pal.surface);
+            }
+        }
+        let hit = Rect::from_center_size(c, Vec2::splat(18.0));
         if ui.rect_contains_pointer(hit) {
             response.clone().on_hover_text(label);
         }

@@ -3,7 +3,7 @@
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 
 use super::sessions::{FailureInfo, State};
-use super::theme::{Bold as _, Palette, bold_family, palette};
+use super::theme::{Bold as _, HEADING_SIZE, Palette, TITLE_SIZE, bold_family, palette};
 use super::widgets::{self, Icon, card};
 use crate::profile::Profile;
 
@@ -35,7 +35,7 @@ pub fn ui(ui: &mut Ui, profile: &Profile, state: Option<&State>, log: &[String])
 
         card(ui, |ui| {
             widgets::section_title(ui, "연결 정보", None);
-            egui::Grid::new("details").num_columns(2).spacing([28.0, 10.0]).show(ui, |ui| {
+            egui::Grid::new("details").num_columns(2).min_row_height(20.0).spacing([28.0, 8.0]).show(ui, |ui| {
                 let j = &profile.jump;
                 widgets::info_row(ui, &pal, "점프 호스트", &format!("{}@{}:{}", j.user, j.host, j.port));
                 let auth = match &j.key_path {
@@ -78,24 +78,23 @@ pub fn ui(ui: &mut Ui, profile: &Profile, state: Option<&State>, log: &[String])
 
 fn header(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, action: &mut Action) {
     ui.horizontal(|ui| {
-        widgets::avatar(ui, 52.0, &profile.name);
+        widgets::avatar(ui, 44.0, &profile.name);
         ui.add_space(6.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add_space(4.0);
-            ui.add(egui::Label::new(RichText::new(&profile.name).heading().bold()).truncate());
+            ui.add(egui::Label::new(RichText::new(&profile.name).size(HEADING_SIZE).bold()).truncate());
             ui.label(RichText::new(format!("{} · {}", account(profile), profile.target.host)).color(pal.text_weak));
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = state.is_some_and(State::is_active);
             ui.menu_button(RichText::new("···").size(16.0).bold(), |ui| {
                 ui.set_min_width(180.0);
-                if ui.button("호스트 키 초기화…").clicked() {
+                if ui.button("호스트 키 초기화...").clicked() {
                     *action = Action::ForgetKeys;
                     ui.close();
                 }
                 ui.separator();
-                let delete = egui::Button::new(RichText::new("연결 삭제…").color(pal.danger));
+                let delete = egui::Button::new(RichText::new("연결 삭제...").color(pal.danger));
                 if ui
                     .add_enabled(!busy, delete)
                     .on_disabled_hover_text("연결 중에는 삭제할 수 없습니다")
@@ -142,7 +141,7 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     ];
 
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 92.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 88.0), Sense::hover());
     let painter = ui.painter_at(rect.expand(4.0));
     let r = 22.0;
     let cy = rect.top() + r + 4.0;
@@ -217,7 +216,7 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
         let ty = cy + r + 14.0;
         painter.text(Pos2::new(center.x, ty), Align2::CENTER_CENTER, title, FontId::new(13.0, bold_family()), pal.text);
         let max_w = rect.width() * 0.3;
-        let galley = painter.layout(sub.clone(), FontId::proportional(12.0), pal.text_weak, max_w);
+        let galley = painter.layout(sub.clone(), FontId::proportional(13.0), pal.text_weak, max_w);
         let pos = Pos2::new(center.x - galley.size().x / 2.0, ty + 10.0);
         painter.galley(pos, galley, pal.text_weak);
     }
@@ -227,67 +226,84 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     }
 }
 
+/// Idle, connecting and connected share one height so the cards below do not jump between states.
+const STATUS_HEIGHT: f32 = 84.0;
+
 fn status_area(ui: &mut Ui, pal: &Palette, state: Option<&State>, action: &mut Action) {
-    match state {
-        None => {
-            ui.vertical_centered(|ui| {
-                if widgets::large_primary_button(ui, "연결", 220.0).clicked() {
+    if let Some(State::Failed(info)) = state {
+        failure(ui, pal, info, action);
+        return;
+    }
+    let size = Vec2::new(ui.available_width(), STATUS_HEIGHT);
+    ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Center), |ui| {
+        ui.set_min_height(STATUS_HEIGHT);
+        match state {
+            None => {
+                ui.add_space((STATUS_HEIGHT - 44.0) / 2.0);
+                if widgets::large_primary_button(ui, "연결", 220.0).on_hover_text("Enter").clicked() {
                     *action = Action::Connect;
                 }
-                ui.label(RichText::new("Enter 키로도 연결할 수 있습니다").small().color(pal.text_weak));
-            });
-        }
-        Some(State::Starting | State::Ssh | State::Rdp | State::Reconnecting) => {
-            let text = match state {
-                Some(State::Rdp) => "원격 PC에 로그인하는 중…",
-                Some(State::Reconnecting) => "연결이 끊겨 다시 연결하는 중…",
-                _ => "점프 호스트에 연결하는 중…",
-            };
-            progress_row(ui, pal, text, "취소", action);
-        }
-        Some(State::Connected) => {
-            ui.vertical_centered(|ui| {
+            }
+            Some(State::Connected) => {
+                ui.add_space(2.0);
                 widgets::status_pill(ui, pal.success, "연결됨");
-                ui.label(RichText::new("원격 데스크톱 창에서 작업 중입니다.").color(pal.text_weak));
+                ui.label(RichText::new("원격 데스크톱 창이 열려 있습니다.").color(pal.text_weak));
                 if ui.button("연결 끊기").clicked() {
                     *action = Action::Cancel;
                 }
-            });
-        }
-        Some(State::Failed(info)) => failure(ui, pal, info, action),
-    }
-}
-
-fn progress_row(ui: &mut Ui, pal: &Palette, text: &str, cancel: &str, action: &mut Action) {
-    ui.vertical_centered(|ui| {
-        ui.horizontal(|ui| {
-            // Center the spinner + label group.
-            let w = 24.0 + ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), FontId::proportional(15.0), pal.text).size().x);
-            ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-            ui.add(egui::Spinner::new().size(16.0).color(pal.accent));
-            ui.label(RichText::new(text).size(15.0).color(pal.text));
-        });
-        if ui.button(cancel).clicked() {
-            *action = Action::Cancel;
+            }
+            _ => {
+                let text = match state {
+                    Some(State::Rdp) => "원격 PC에 로그인하는 중...",
+                    Some(State::Reconnecting) => "연결이 끊겨 다시 연결하는 중...",
+                    _ => "점프 호스트에 연결하는 중...",
+                };
+                ui.add_space(8.0);
+                progress_row(ui, pal, text, "취소", action);
+            }
         }
     });
 }
 
+fn progress_row(ui: &mut Ui, pal: &Palette, text: &str, cancel: &str, action: &mut Action) {
+    ui.horizontal(|ui| {
+        // Center the spinner + label group.
+        let font = FontId::proportional(TITLE_SIZE);
+        let w = 26.0 + ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font, pal.text).size().x);
+        ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+        ui.add(egui::Spinner::new().size(18.0).color(pal.accent));
+        ui.label(RichText::new(text).size(TITLE_SIZE).color(pal.text));
+    });
+    if ui.button(cancel).clicked() {
+        *action = Action::Cancel;
+    }
+}
+
 fn failure(ui: &mut Ui, pal: &Palette, info: &FailureInfo, action: &mut Action) {
     widgets::banner(ui, pal.danger_soft, pal.danger.gamma_multiply(0.4), |ui| {
-        ui.label(RichText::new(&info.title).bold().size(15.0).color(pal.danger));
+        ui.label(RichText::new(&info.title).bold().size(TITLE_SIZE).color(pal.danger));
         ui.label(RichText::new(&info.hint).color(pal.text));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            // The primary button is the step that can actually fix this failure.
             if info.key_changed {
-                if widgets::danger_button(ui, "호스트 키 초기화…").clicked() {
+                if widgets::danger_button(ui, "호스트 키 초기화...").clicked() {
                     *action = Action::ForgetKeys;
                 }
-            } else if widgets::primary_button(ui, "다시 시도").clicked() {
-                *action = Action::Connect;
-            }
-            if info.hint.contains("편집") && ui.button("편집").clicked() {
-                *action = Action::Edit;
+            } else if info.fix_in_settings {
+                if widgets::primary_button(ui, "설정 편집").clicked() {
+                    *action = Action::Edit;
+                }
+                if ui.button("다시 시도").clicked() {
+                    *action = Action::Connect;
+                }
+            } else {
+                if widgets::primary_button(ui, "다시 시도").clicked() {
+                    *action = Action::Connect;
+                }
+                if ui.button("설정 편집").clicked() {
+                    *action = Action::Edit;
+                }
             }
             if widgets::ghost_button(ui, "닫기").clicked() {
                 *action = Action::Dismiss;

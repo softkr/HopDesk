@@ -14,6 +14,8 @@ pub struct Palette {
     /// Quiet fill for secondary buttons / hovered rows.
     pub subtle: Color32,
     pub border: Color32,
+    /// Outline of inputs and buttons (at least 3:1 against `surface`).
+    pub control_border: Color32,
     pub text: Color32,
     pub text_weak: Color32,
     pub accent: Color32,
@@ -32,10 +34,11 @@ pub const LIGHT: Palette = Palette {
     surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     subtle: Color32::from_rgb(0xE6, 0xE9, 0xEE),
     border: Color32::from_rgb(0xDC, 0xE0, 0xE6),
+    control_border: Color32::from_rgb(0x8A, 0x92, 0x9D),
     text: Color32::from_rgb(0x1F, 0x23, 0x28),
     text_weak: Color32::from_rgb(0x65, 0x6D, 0x78),
-    accent: Color32::from_rgb(0x25, 0x63, 0xEB),
-    accent_soft: Color32::from_rgb(0xE3, 0xEC, 0xFD),
+    accent: Color32::from_rgb(0x18, 0x64, 0x72),
+    accent_soft: Color32::from_rgb(0xD9, 0xEC, 0xEF),
     on_accent: Color32::WHITE,
     success: Color32::from_rgb(0x16, 0xA3, 0x4A),
     warning: Color32::from_rgb(0xD9, 0x77, 0x06),
@@ -49,20 +52,25 @@ pub const DARK: Palette = Palette {
     surface: Color32::from_rgb(0x24, 0x27, 0x2C),
     subtle: Color32::from_rgb(0x2E, 0x32, 0x38),
     border: Color32::from_rgb(0x36, 0x3B, 0x42),
+    control_border: Color32::from_rgb(0x6E, 0x77, 0x83),
     text: Color32::from_rgb(0xE6, 0xE8, 0xEB),
     text_weak: Color32::from_rgb(0x9A, 0xA1, 0xAB),
-    accent: Color32::from_rgb(0x4C, 0x8D, 0xFF),
-    accent_soft: Color32::from_rgb(0x1F, 0x2D, 0x4A),
-    on_accent: Color32::WHITE,
+    accent: Color32::from_rgb(0x4F, 0xC3, 0xC6),
+    accent_soft: Color32::from_rgb(0x17, 0x3A, 0x42),
+    on_accent: Color32::from_rgb(0x08, 0x25, 0x2C),
     success: Color32::from_rgb(0x3F, 0xB9, 0x50),
     warning: Color32::from_rgb(0xE3, 0xA0, 0x08),
-    danger: Color32::from_rgb(0xF8, 0x51, 0x49),
+    danger: Color32::from_rgb(0xFF, 0x7B, 0x72),
     danger_soft: Color32::from_rgb(0x3A, 0x1F, 0x21),
 };
 
 pub fn palette(ui: &Ui) -> Palette {
     if ui.visuals().dark_mode { DARK } else { LIGHT }
 }
+
+/// Type scale: 13 (small), 14 (body), 16 (titles), 22 (page heading).
+pub const TITLE_SIZE: f32 = 16.0;
+pub const HEADING_SIZE: f32 = 22.0;
 
 pub const RADIUS: u8 = 8;
 pub const CARD_RADIUS: u8 = 12;
@@ -119,7 +127,7 @@ pub fn apply(ctx: &egui::Context) {
     for (theme, pal) in [(Theme::Light, LIGHT), (Theme::Dark, DARK)] {
         ctx.style_mut_of(theme, |style| {
             style.text_styles = [
-                (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+                (TextStyle::Small, FontId::new(13.0, FontFamily::Proportional)),
                 (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
                 (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
                 (TextStyle::Heading, FontId::new(22.0, FontFamily::Proportional)),
@@ -156,7 +164,7 @@ pub fn apply(ctx: &egui::Context) {
 
             w.inactive.weak_bg_fill = pal.subtle;
             w.inactive.bg_fill = pal.subtle;
-            w.inactive.bg_stroke = Stroke::new(1.0, pal.border);
+            w.inactive.bg_stroke = Stroke::new(1.0, pal.control_border);
             w.inactive.fg_stroke = Stroke::new(1.0, pal.text);
             w.inactive.corner_radius = radius;
 
@@ -167,7 +175,7 @@ pub fn apply(ctx: &egui::Context) {
             };
             w.hovered.weak_bg_fill = hover_fill;
             w.hovered.bg_fill = hover_fill;
-            w.hovered.bg_stroke = Stroke::new(1.0, pal.accent.gamma_multiply(0.6));
+            w.hovered.bg_stroke = Stroke::new(1.0, pal.accent);
             w.hovered.fg_stroke = Stroke::new(1.5, pal.text);
             w.hovered.corner_radius = radius;
             w.hovered.expansion = 0.0;
