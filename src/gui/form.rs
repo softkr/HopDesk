@@ -280,7 +280,7 @@ impl Form {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let save = if self.is_new() { "연결 추가" } else { "저장" };
-                        if widgets::primary_button(ui, save).on_hover_text("⌘S").clicked() {
+                        if widgets::primary_button(ui, save).on_hover_text(super::platform::shortcut("S")).clicked() {
                             action = Action::Save;
                         }
                         if ui.button("취소").on_hover_text("Esc").clicked() {
@@ -425,7 +425,7 @@ impl Form {
             });
 
             ui.label(
-                RichText::new("비밀번호는 macOS 키체인에만 저장되며, 설정 파일에는 기록되지 않습니다.")
+                RichText::new(format!("비밀번호는 {}에만 저장되며, 설정 파일에는 기록되지 않습니다.", super::platform::SECRET_STORE))
                     .small()
                     .color(pal.text_weak),
             );
@@ -468,7 +468,7 @@ fn secret_field(
     field(ui, label, error, |ui| {
         if !*change && !force {
             ui.horizontal(|ui| {
-                widgets::status_pill(ui, pal.success, "키체인에 저장됨");
+                widgets::status_pill(ui, pal.success, &format!("{}에 저장됨", super::platform::SECRET_STORE_SHORT));
                 if ui.button("변경").clicked() {
                     *change = true;
                 }

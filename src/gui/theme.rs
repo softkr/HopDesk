@@ -67,10 +67,6 @@ pub fn palette(ui: &Ui) -> Palette {
 pub const RADIUS: u8 = 8;
 pub const CARD_RADIUS: u8 = 12;
 
-const SYSTEM_FONT: &str = "/System/Library/Fonts/AppleSDGothicNeo.ttc";
-const REGULAR_FACE: u32 = 0;
-const SEMIBOLD_FACE: u32 = 4;
-
 pub fn bold_family() -> FontFamily {
     FontFamily::Name("bold".into())
 }
@@ -86,22 +82,33 @@ impl Bold for egui::RichText {
     }
 }
 
-/// Uses Apple SD Gothic Neo (the macOS Korean UI font) for Latin and Hangul alike, so weights match.
-/// Falls back to egui's bundled font elsewhere; the bold family then maps to the regular face.
+/// Uses the OS Korean UI font (Apple SD Gothic Neo, Malgun Gothic, Noto Sans CJK) for Latin and
+/// Hangul alike, so weights match. Without one, egui's bundled font is used and bold maps to regular.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let mut bold = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    if let Ok(bytes) = std::fs::read(SYSTEM_FONT) {
-        let blob: egui::epaint::text::Blob = std::sync::Arc::new(bytes);
-        for (name, face) in [("sd-regular", REGULAR_FACE), ("sd-semibold", SEMIBOLD_FACE)] {
+    if let Some(font) = super::platform::ui_font() {
+        let mut blobs: Vec<(std::path::PathBuf, egui::epaint::text::Blob)> = Vec::new();
+        let mut load = |path: &std::path::PathBuf| -> Option<egui::epaint::text::Blob> {
+            if let Some((_, blob)) = blobs.iter().find(|(p, _)| p == path) {
+                return Some(blob.clone());
+            }
+            let blob: egui::epaint::text::Blob = std::sync::Arc::new(std::fs::read(path).ok()?);
+            blobs.push((path.clone(), blob.clone()));
+            Some(blob)
+        };
+        if let (Some(regular), Some(semibold)) = (load(&font.regular.0), load(&font.bold.0)) {
             fonts
                 .font_data
-                .insert(name.into(), egui::FontData::from_blob(blob.clone(), face).into());
+                .insert("ui-regular".into(), egui::FontData::from_blob(regular, font.regular.1).into());
+            fonts
+                .font_data
+                .insert("ui-bold".into(), egui::FontData::from_blob(semibold, font.bold.1).into());
+            if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
+                list.insert(0, "ui-regular".into());
+            }
+            bold.insert(0, "ui-bold".into());
         }
-        if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
-            list.insert(0, "sd-regular".into());
-        }
-        bold.insert(0, "sd-semibold".into());
     }
     fonts.families.insert(bold_family(), bold);
     ctx.set_fonts(fonts);

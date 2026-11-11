@@ -5,6 +5,7 @@
 
 mod detail;
 mod form;
+mod platform;
 mod sessions;
 mod theme;
 mod widgets;
@@ -23,12 +24,21 @@ use self::theme::{Bold as _, Palette, bold_family, palette};
 use crate::profile::{Profile, ProfileStore};
 use crate::trust::TrustStore;
 
+/// macOS draws icons on Apple's grid (with margin); elsewhere the tile fills the square.
+#[cfg(target_os = "macos")]
+const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-256.png");
+#[cfg(not(target_os = "macos"))]
+const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-full-256.png");
+
 pub fn run() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("HopDesk")
+            // Matches hopdesk.desktop so Linux desktops show the right icon and name.
+            .with_app_id("hopdesk")
             .with_inner_size([980.0, 680.0])
-            .with_min_inner_size([760.0, 520.0]),
+            .with_min_inner_size([760.0, 520.0])
+            .with_icon(eframe::icon_data::from_png_bytes(WINDOW_ICON).expect("bundled icon is a valid PNG")),
         ..Default::default()
     };
     eframe::run_native(
@@ -341,7 +351,7 @@ impl Launcher {
             ui.label(RichText::new("HopDesk").size(17.0).bold().color(pal.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let add = egui::Button::new(RichText::new("+").size(18.0)).min_size(Vec2::new(30.0, 30.0));
-                if ui.add(add).on_hover_text("새 연결  ⌘N").clicked() {
+                if ui.add(add).on_hover_text(format!("새 연결  {}", platform::shortcut("N"))).clicked() {
                     self.navigate(Nav::New);
                 }
             });
@@ -349,7 +359,7 @@ impl Launcher {
         ui.add_space(6.0);
 
         if !self.store.profiles().is_empty() {
-            let search = widgets::text_input(ui, &mut self.search, "검색  ⌘F", ui.available_width(), false)
+            let search = widgets::text_input(ui, &mut self.search, &format!("검색  {}", platform::shortcut("F")), ui.available_width(), false)
                 .id(Id::unique("search"));
             let response = ui.add(search);
             if response.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -433,7 +443,7 @@ impl Launcher {
                 ui.label(RichText::new("첫 연결을 만들어 보세요").size(22.0).bold().color(pal.text));
                 ui.add_space(2.0);
                 ui.label(
-                    RichText::new("SSH 점프 호스트를 거쳐 원격 Windows PC에 안전하게 접속합니다.\n비밀번호는 macOS 키체인에 저장됩니다.")
+                    RichText::new(format!("SSH 점프 호스트를 거쳐 원격 Windows PC에 안전하게 접속합니다.\n비밀번호는 {}에 저장됩니다.", platform::SECRET_STORE))
                         .color(pal.text_weak),
                 );
                 ui.add_space(16.0);
@@ -451,7 +461,7 @@ impl Launcher {
         let (title, body, confirm, danger) = match dialog {
             Dialog::Delete(id) => (
                 format!("‘{}’ 연결을 삭제할까요?", self.profile(id).map_or("", |p| p.name.as_str())),
-                "키체인에 저장된 비밀번호도 함께 삭제되며, 되돌릴 수 없습니다.".to_owned(),
+                format!("{}에 저장된 비밀번호도 함께 삭제되며, 되돌릴 수 없습니다.", platform::SECRET_STORE_SHORT),
                 "삭제",
                 true,
             ),

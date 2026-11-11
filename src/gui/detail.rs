@@ -107,7 +107,7 @@ fn header(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, 
             })
             .response
             .on_hover_text("더 보기");
-            if ui.button("편집").on_hover_text("⌘E").clicked() {
+            if ui.button("편집").on_hover_text(super::platform::shortcut("E")).clicked() {
                 *action = Action::Edit;
             }
         });
@@ -136,7 +136,7 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
 
     let jump_auth = if profile.jump.key_path.is_some() { "개인 키" } else { "비밀번호" };
     let labels = [
-        (Icon::Laptop, "이 Mac".to_owned(), "로컬".to_owned()),
+        (Icon::Laptop, super::platform::THIS_DEVICE.to_owned(), "로컬".to_owned()),
         (Icon::Gateway, "점프 호스트".to_owned(), format!("{} · {jump_auth}", profile.jump.host)),
         (Icon::Monitor, "원격 PC".to_owned(), format!("{}:{}", profile.target.host, profile.target.port)),
     ];

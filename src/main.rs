@@ -11,6 +11,9 @@
 //! hopdesk forget <host>
 //! ```
 
+// Windows: no console window when the launcher is double-clicked (see `attach_parent_console`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod gui;
 mod profile;
 mod session;
@@ -85,6 +88,9 @@ struct AddArgs {
 }
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    attach_parent_console();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,russh=warn".into()),
@@ -232,6 +238,20 @@ fn parse_user_host_port(s: &str, default_port: u16) -> anyhow::Result<(String, S
     let (user, rest) = s.split_once('@').with_context(|| format!("expected `user@host[:port]`, got `{s}`"))?;
     let (host, port) = parse_host_port(rest, default_port)?;
     Ok((user.to_owned(), host, port))
+}
+
+/// The Windows build uses the GUI subsystem, so it starts without a console. When it is run from
+/// a shell, attach to that shell's console so command-line output and password prompts work.
+/// Handles the parent already passed in (the launcher pipes the stderr of `connect`) are kept.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE};
+    // SAFETY: plain Win32 calls without pointer arguments.
+    unsafe {
+        if GetStdHandle(STD_ERROR_HANDLE).is_null() {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
 }
 
 /// Per-user configuration directory, created on demand.

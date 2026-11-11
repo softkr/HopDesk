@@ -1,6 +1,6 @@
 # HopDesk
 
-SSH 점프 호스트(배스천)를 거쳐 사내망의 Windows PC에 원격 데스크톱(RDP)으로 접속하는 macOS 앱입니다.
+SSH 점프 호스트(배스천)를 거쳐 사내망의 Windows PC에 원격 데스크톱(RDP)으로 접속하는 앱입니다. macOS, Windows, Linux에서 동작합니다.
 
 터널을 따로 열고 원격 데스크톱 앱을 실행할 필요 없이, 저장한 연결을 고르고 **연결**을 누르면 됩니다.
 HopDesk가 SSH 터널을 열고 저장된 계정으로 Windows에 자동 로그인합니다.
@@ -10,7 +10,7 @@ HopDesk가 SSH 터널을 열고 저장된 계정으로 Windows에 자동 로그�
 ## 주요 기능
 
 - **한 번에 접속:** 점프 호스트 SSH 로그인부터 Windows 로그인까지 자동으로 처리합니다.
-- **안전한 비밀번호 보관:** 비밀번호와 개인 키 암호는 macOS 키체인에만 저장하고, 설정 파일에는 기록하지 않습니다.
+- **안전한 비밀번호 보관:** 비밀번호와 개인 키 암호는 운영체제의 보안 저장소(macOS 키체인, Windows 자격 증명 관리자, Linux Secret Service)에만 저장하고, 설정 파일에는 기록하지 않습니다.
 - **호스트 검증:** 처음 접속할 때 SSH 호스트 키와 RDP 서버 인증서를 기억합니다(TOFU). 이후 바뀌면 접속을 막고 경고합니다.
 - **진행 상황 표시:** `이 Mac → 점프 호스트 → 원격 PC` 경로 그림에 연결 단계가 표시되고, 실패하면 어느 구간에서 막혔는지 알려 줍니다.
 - **알기 쉬운 오류 안내:** 오류 원문 대신 원인과 해결 방법을 한국어로 보여 줍니다.
@@ -24,29 +24,45 @@ HopDesk가 SSH 터널을 열고 저장된 계정으로 Windows에 자동 로그�
 
 ## 설치
 
-미리 빌드된 배포판은 아직 없으므로 소스에서 빌드합니다.
+[Releases](https://github.com/softkr/HopDesk/releases) 페이지에서 운영체제에 맞는 파일을 내려받습니다.
 
-필요한 것:
-- macOS
-- Rust 1.95 이상 — [rustup](https://rustup.rs)으로 설치
+| 운영체제 | 파일 | 설치 |
+|---|---|---|
+| macOS 11 이상 (Apple Silicon, Intel) | `…-macos-universal.dmg` | dmg를 열고 HopDesk를 응용 프로그램 폴더로 끌어 놓기 |
+| Windows 10 / 11 (64비트) | `…-windows-x64.zip` | 압축을 풀고 `HopDesk.exe` 실행 |
+| Linux (x86_64) | `…-linux-x86_64.tar.gz` | 압축을 풀고 `./install.sh` 실행 (앱 메뉴에 등록) |
+
+앱에 코드 서명이 되어 있지 않아 처음 실행할 때 경고가 나옵니다.
+- **macOS:** **시스템 설정 → 개인정보 보호 및 보안**에서 **그래도 열기**를 누릅니다.
+- **Windows:** **추가 정보 → 실행**을 누릅니다.
+
+### 소스에서 빌드
+
+[rustup](https://rustup.rs)으로 Rust 1.95 이상을 설치한 뒤 빌드합니다.
 
 ```sh
 git clone https://github.com/softkr/HopDesk.git
 cd HopDesk
-scripts/bundle-macos.sh            # target/release/HopDesk.app 생성
-scripts/bundle-macos.sh --install  # /Applications 에 설치
+cargo build --release              # target/release/hopdesk
+scripts/bundle-macos.sh --install  # macOS: HopDesk.app 을 만들어 /Applications 에 설치
 ```
 
-앱에는 임시(ad-hoc) 서명만 되어 있습니다. 다른 Mac으로 옮겨 처음 열 때 Gatekeeper가 막으면 Finder에서 우클릭한 뒤 **열기**를 선택하세요.
+Linux에서는 먼저 빌드에 필요한 패키지를 설치합니다(Debian/Ubuntu 기준).
+
+```sh
+sudo apt install pkg-config cmake libasound2-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev libdrm-dev
+```
 
 ## 사용법
 
-1. HopDesk를 실행하고 **새 연결 만들기**(⌘N)를 누릅니다.
+1. HopDesk를 실행하고 **새 연결 만들기**(⌘N, Windows·Linux는 Ctrl+N)를 누릅니다.
 2. 아래 항목을 입력하고 저장합니다(⌘S).
    - 점프 호스트의 주소, 사용자 이름, 인증 방식
    - 원격 PC의 주소. 점프 호스트에서 보이는 주소(예: `10.0.0.5`)를 입력합니다.
    - Windows 계정
 3. 목록에서 연결을 고르고 **연결**(Enter)을 누릅니다. 원격 데스크톱은 별도 창으로 열립니다.
+
+Windows와 Linux에서는 ⌘ 대신 Ctrl을 누릅니다.
 
 | 단축키 | 동작 |
 |---|---|
@@ -74,13 +90,12 @@ hopdesk remove office
 
 ## 저장 위치
 
-| 내용 | 위치 |
-|---|---|
-| 연결 설정 | `~/Library/Application Support/HopDesk/profiles.toml` |
-| 기억한 호스트 키·인증서 | `~/Library/Application Support/HopDesk/trust.toml` |
-| 비밀번호 | macOS 키체인, 서비스 이름 `HopDesk` |
+| 내용 | macOS | Windows | Linux |
+|---|---|---|---|
+| 연결 설정 (`profiles.toml`)<br>기억한 호스트 키·인증서 (`trust.toml`) | `~/Library/Application Support/HopDesk/` | `%APPDATA%\HopDesk\config\` | `~/.config/hopdesk/` |
+| 비밀번호 | 키체인 | 자격 증명 관리자 | Secret Service (GNOME 키링, KWallet) |
 
-두 설정 파일은 소유자만 읽을 수 있는 권한(0600)으로 저장됩니다.
+비밀번호 항목의 서비스 이름은 `HopDesk`입니다. macOS와 Linux에서는 설정 파일을 소유자만 읽을 수 있는 권한(0600)으로 저장합니다.
 
 ## 동작 방식
 
@@ -99,6 +114,7 @@ cargo run                    # GUI 실행
 cargo run -- connect office  # 명령줄로 접속
 cargo clippy
 HOPDESK_SHOTS=target/screenshots cargo test screenshots -- --ignored   # 화면 스냅숏 생성
+scripts/make-icon.sh         # assets/icon/*.svg 로 아이콘 파일 생성 (resvg 필요)
 ```
 
 | 경로 | 내용 |
@@ -114,6 +130,19 @@ GUI에서 연결할 때마다 `hopdesk connect <이름>`을 별도 프로세스�
 
 RDP 엔진은 [IronRDP](https://github.com/Devolutions/IronRDP)를 `third_party/`에 포함해 사용합니다.
 SSH 채널을 전송 계층으로 쓰기 위한 작은 패치를 적용했으며, 자세한 내용은 [third_party/PATCHES.md](third_party/PATCHES.md)에 있습니다.
+
+### 릴리스
+
+`Cargo.toml`의 `version`을 올리고 커밋한 뒤 같은 버전의 태그를 올립니다.
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions([.github/workflows/release.yml](.github/workflows/release.yml))가 macOS(유니버설), Windows, Linux용 패키지를 빌드하고 릴리스를 만듭니다.
+Actions 탭에서 수동으로 실행하면 릴리스 없이 빌드만 하고, 결과물은 실행 기록에 첨부됩니다.
+릴리스 설명은 [.github/release-notes.md](.github/release-notes.md)를 바탕으로 만들어집니다.
 
 ## 라이선스
 

@@ -1,0 +1,115 @@
+# Builds HopDesk for macOS, Windows and Linux.
+#
+# - Push a tag `v*` (e.g. `git tag v0.1.0 && git push origin v0.1.0`):
+#   builds all platforms and publishes a GitHub release with the packages.
+# - Run manually (Actions > Release > Run workflow): builds only; packages are
+#   attached to the workflow run as artifacts.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon + Intel)
+            os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - name: Windows (x64)
+            os: windows-latest
+            targets: ""
+          # Oldest supported runner, so the binary runs on older glibc versions too.
+          - name: Linux (x64)
+            os: ubuntu-22.04
+            targets: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake libasound2-dev libfontconfig1-dev libxkbcommon-dev \
+            libwayland-dev libudev-dev libdrm-dev
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: scripts/release-macos.sh --universal
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          # aws-lc-sys: use its bundled assembly objects instead of requiring NASM.
+          AWS_LC_SYS_PREBUILT_NASM: "1"
+        run: scripts/release-windows.ps1
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/release-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hopdesk-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sed "s/{{VERSION}}/$version/g" .github/release-notes.md > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "HopDesk $version" \
+            --notes-file notes.md \
+            --verify-tag

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=HopDesk
+GenericName=Remote Desktop
+GenericName[ko]=원격 데스크톱
+Comment=Connect to Windows PCs over RDP through an SSH jump host
+Comment[ko]=SSH 점프 호스트를 거쳐 Windows PC에 원격 데스크톱으로 접속합니다
+Exec=hopdesk
+Icon=hopdesk
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=RDP;SSH;bastion;jump;remote;
+StartupWMClass=hopdesk
