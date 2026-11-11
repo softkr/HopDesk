@@ -1,0 +1,43 @@
+[package]
+name = "hopdesk"
+version = "0.1.0"
+edition = "2024"
+description = "HopDesk: RDP desktop client connecting through an SSH jump host"
+publish = false
+
+[dependencies]
+# RDP engine + winit/softbuffer viewer: IronRDP HEAD (d5e70f0) with a small custom-transport
+# patch, see third_party/PATCHES.md
+ironrdp-client = { path = "third_party/IronRDP/crates/ironrdp-client", features = ["rustls"] }
+ironrdp-viewer = { path = "third_party/IronRDP/crates/ironrdp-viewer" }
+ironrdp-pdu = { path = "third_party/IronRDP/crates/ironrdp-pdu" }
+ironrdp-tls = { path = "third_party/IronRDP/crates/ironrdp-tls", features = ["rustls"] }
+
+# SSH jump host
+russh = "0.65"
+
+# Window
+winit = { version = "0.30", features = ["rwh_06"] }
+
+# Profiles & secrets
+keyring = "4"
+directories = "6"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.11"
+rpassword = "7"
+whoami = "2.1"
+
+# Runtime, CLI, logging
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+eframe = "0.37"
+rfd = "0.18"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
+egui_system_font_provider = "0.37"

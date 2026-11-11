@@ -1,0 +1,69 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+
+## [[0.9.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-input-v0.8.0...ironrdp-input-v0.9.0)] - 2026-10-27
+
+### <!-- 7 -->Build
+
+- [**breaking**] Update `ironrdp-pdu` public dependency to 0.11
+
+
+
+## [[0.8.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-input-v0.7.0...ironrdp-input-v0.8.0)] - 2026-10-23
+
+### <!-- 4 -->Bug Fixes
+
+- Clamp wheel rotation units to the wire's 9-bit range (`MousePdu::WHEEL_ROTATION_RANGE`) in `Database::apply` instead of sending a wrapped value ([#1818](https://github.com/Devolutions/IronRDP/issues/1818)) ([2685d85cc4](https://github.com/Devolutions/IronRDP/commit/2685d85cc4f95e2ee3294e4edda4d0ff41f9ff80))
+
+### <!-- 7 -->Build
+
+- Raise the minimum supported Rust version to 1.94 ([#1495](https://github.com/Devolutions/IronRDP/issues/1495)) ([0aeea76e95](https://github.com/Devolutions/IronRDP/commit/0aeea76e95e6b6b590d65be353dd00596d50a895))
+
+- [**breaking**] Update `ironrdp-pdu` public dependency to 0.10
+
+
+
+## [[0.7.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-input-v0.6.0...ironrdp-input-v0.7.0)] - 2026-07-10
+
+### <!-- 7 -->Build
+
+- [**breaking**] Update `ironrdp-pdu` public dependency to 0.9
+
+
+
+## [[0.6.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-input-v0.5.0...ironrdp-input-v0.6.0)] - 2026-05-27
+
+### <!-- 7 -->Build
+
+- [**breaking**] Update `ironrdp-pdu` public dependency to 0.8
+
+## [[0.2.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-input-v0.1.3...ironrdp-input-v0.2.0)] - 2025-03-12
+
+### <!-- 7 -->Build
+
+- Bump ironrdp-pdu
+
+
+## [[0.1.3](https://github.com/Devolutions/IronRDP/compare/ironrdp-input-v0.1.2...ironrdp-input-v0.1.3)] - 2025-03-12
+
+### <!-- 7 -->Build
+
+- Update dependencies (#695) ([c21fa44fd6](https://github.com/Devolutions/IronRDP/commit/c21fa44fd6f3c6a6b74788ff68e83133c1314caa)) 
+
+## [[0.1.2](https://github.com/Devolutions/IronRDP/compare/ironrdp-input-v0.1.1...ironrdp-input-v0.1.2)] - 2025-01-28
+
+### <!-- 6 -->Documentation
+
+- Use CDN URLs instead of the blob storage URLs for Devolutions logo (#631) ([dd249909a8](https://github.com/Devolutions/IronRDP/commit/dd249909a894004d4f728d30b3a4aa77a0f8193b)) 
+
+
+## [[0.1.1](https://github.com/Devolutions/IronRDP/compare/ironrdp-input-v0.1.0...ironrdp-input-v0.1.1)] - 2024-12-14
+
+### Other
+
+- Symlinks to license files in packages ([#604](https://github.com/Devolutions/IronRDP/pull/604)) ([6c2de344c2](https://github.com/Devolutions/IronRDP/commit/6c2de344c2dd93ce9621834e0497ed7c3bfaf91a)) 

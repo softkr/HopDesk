@@ -1,0 +1,541 @@
+use ironrdp_egfx::decode::{H264Decoder, OpenH264Decoder};
+
+// ============================================================================
+// Test Helpers
+// ============================================================================
+
+/// Generate a minimal Annex B H.264 bitstream (start code prefixed) by
+/// encoding a black 16x16 frame. This is the format MS-RDPEGFX specifies.
+fn generate_test_annex_b_bitstream() -> Vec<u8> {
+    use openh264::encoder::Encoder;
+    use openh264::formats::YUVBuffer;
+
+    let mut encoder = Encoder::new().expect("encoder should initialize");
+
+    // Black 16x16 YUV420p frame (all zeros)
+    let yuv = YUVBuffer::new(16, 16);
+    let bitstream = encoder.encode(&yuv).expect("encode should succeed");
+    bitstream.to_vec()
+}
+
+/// Generate a minimal AVC-format H.264 bitstream by encoding a black 16x16 frame
+///
+/// The encoder produces Annex B format (start code prefixed). This function
+/// converts the output to AVC format (4-byte BE length prefixed) to exercise
+/// the full decode pipeline including AVC-to-Annex-B conversion.
+fn generate_test_avc_bitstream() -> Vec<u8> {
+    annex_b_to_avc(&generate_test_annex_b_bitstream())
+}
+
+/// Convert Annex B format NAL units to AVC format (4-byte BE length prefix)
+fn annex_b_to_avc(data: &[u8]) -> Vec<u8> {
+    let mut avc = Vec::new();
+    let mut i = 0;
+
+    // Find NAL unit boundaries by scanning for start codes
+    let mut nal_starts = Vec::new();
+    while i < data.len() {
+        if i + 3 < data.len() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1 {
+            nal_starts.push(i + 4);
+            i += 4;
+        } else if i + 2 < data.len() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            nal_starts.push(i + 3);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+
+    for (idx, &start) in nal_starts.iter().enumerate() {
+        let end = if idx + 1 < nal_starts.len() {
+            // Find the start code before the next NAL
+            let next_start = nal_starts[idx + 1];
+            // Back up past the start code prefix
+            if next_start >= 4 && data[next_start - 4] == 0 && data[next_start - 3] == 0 && data[next_start - 2] == 0 {
+                next_start - 4
+            } else {
+                next_start - 3
+            }
+        } else {
+            data.len()
+        };
+
+        let nal_data = &data[start..end];
+
+        #[expect(clippy::as_conversions, reason = "NAL unit length for test data")]
+        let len = nal_data.len() as u32;
+        avc.extend_from_slice(&len.to_be_bytes());
+        avc.extend_from_slice(nal_data);
+    }
+
+    avc
+}
+
+// ============================================================================
+// Surface Streams
+// ============================================================================
+
+/// Each surface is an H.264 stream of its own, and P-frames need that stream's own reference pictures.
+/// On one decoder, two interleaved streams fail with OpenH264 error 2, then error 18.
+// oracle: regression #2033
+#[test]
+fn test_openh264_interleaved_surface_streams() {
+    use std::sync::{Arc, Mutex};
+
+    use ironrdp_core::encode_vec;
+    use ironrdp_dvc::DvcProcessor as _;
+    use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler};
+    use ironrdp_egfx::pdu::{
+        Avc420Region, CapabilitiesConfirmPdu, CapabilitiesV107Flags, CapabilitySet, Codec1Type, CreateSurfacePdu,
+        GfxPdu, PixelFormat, WireToSurface1Pdu, encode_avc420_bitmap_stream,
+    };
+    use ironrdp_graphics::zgfx::wrap_uncompressed;
+    use ironrdp_pdu::geometry::ExclusiveRectangle;
+    use openh264::encoder::Encoder;
+    use openh264::formats::YUVBuffer;
+
+    const SIZE: u16 = 64;
+    const FRAMES: u8 = 12;
+
+    struct Sink(Arc<Mutex<Vec<(u16, u8)>>>);
+    impl GraphicsPipelineHandler for Sink {
+        fn on_bitmap_updated(&mut self, update: &BitmapUpdate) {
+            self.0.lock().unwrap().push((update.surface_id, update.data[0]));
+        }
+    }
+
+    let send = |client: &mut GraphicsPipelineClient, pdu: GfxPdu| {
+        let wire = wrap_uncompressed(&encode_vec(&pdu).expect("the PDU should encode"));
+        client.process(0, &wire).expect("the client should accept the PDU");
+    };
+    let gray_frame = |luma: u8| {
+        let (luma_size, chroma_size) = (
+            usize::from(SIZE) * usize::from(SIZE),
+            usize::from(SIZE) * usize::from(SIZE) / 2,
+        );
+        let mut planes = vec![luma; luma_size];
+        planes.resize(luma_size + chroma_size, 128);
+        YUVBuffer::from_vec(planes, usize::from(SIZE), usize::from(SIZE))
+    };
+
+    let painted = Arc::new(Mutex::new(Vec::new()));
+    let mut client = GraphicsPipelineClient::new(
+        Box::new(Sink(Arc::clone(&painted))),
+        Some(Box::new(OpenH264Decoder::new().expect("decoder should initialize"))),
+    )
+    .with_h264_decoder_factory(Box::new(|| -> Option<Box<dyn H264Decoder>> {
+        Some(Box::new(OpenH264Decoder::new().ok()?))
+    }));
+
+    send(
+        &mut client,
+        GfxPdu::CapabilitiesConfirm(CapabilitiesConfirmPdu::from_typed(&CapabilitySet::V10_7 {
+            flags: CapabilitiesV107Flags::empty(),
+        })),
+    );
+    for surface_id in [1, 2] {
+        send(
+            &mut client,
+            GfxPdu::CreateSurface(CreateSurfacePdu {
+                surface_id,
+                width: SIZE,
+                height: SIZE,
+                pixel_format: PixelFormat::XRgb,
+            }),
+        );
+    }
+
+    // Each stream's picture changes every frame, so the encoder sends real P-frames.
+    let mut encoders = [
+        (1u16, 180u8, Encoder::new().expect("encoder should initialize")),
+        (2u16, 60u8, Encoder::new().expect("encoder should initialize")),
+    ];
+    for frame in 0..FRAMES {
+        for (surface_id, base, encoder) in &mut encoders {
+            let bitstream = encoder
+                .encode(&gray_frame(*base + frame))
+                .expect("encode should succeed")
+                .to_vec();
+            let region = Avc420Region::full_frame(SIZE, SIZE, 22);
+            send(
+                &mut client,
+                GfxPdu::WireToSurface1(WireToSurface1Pdu {
+                    surface_id: *surface_id,
+                    codec_id: Codec1Type::Avc420,
+                    pixel_format: PixelFormat::XRgb,
+                    destination_rectangle: ExclusiveRectangle {
+                        left: 0,
+                        top: 0,
+                        right: SIZE,
+                        bottom: SIZE,
+                    },
+                    bitmap_data: encode_avc420_bitmap_stream(&[region], &bitstream),
+                }),
+            );
+        }
+    }
+
+    let painted = painted.lock().unwrap();
+    assert_eq!(painted.len(), usize::from(FRAMES) * 2, "every update should be painted");
+    for (surface_id, first_channel) in painted.iter() {
+        let expected = if *surface_id == 1 { 180u8 } else { 60u8 };
+        assert!(
+            first_channel.abs_diff(expected) <= FRAMES + 8,
+            "surface {surface_id} painted {first_channel}, expected about {expected}"
+        );
+    }
+}
+
+// ============================================================================
+// Happy Path Tests
+// ============================================================================
+
+#[test]
+fn test_openh264_decoder_init() {
+    let _decoder = OpenH264Decoder::new().expect("decoder should initialize");
+}
+
+#[test]
+fn test_openh264_decode_sps_pps() {
+    // Generate a full bitstream (SPS + PPS + IDR) and verify decode succeeds.
+    // SPS and PPS are always delivered together with the first I-frame
+    // in RFX_AVC420_BITMAP_STREAM payloads.
+    let avc_data = generate_test_avc_bitstream();
+    assert!(!avc_data.is_empty(), "encoder should produce output");
+
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+    let frame = decoder.decode(&avc_data).expect("decode should succeed");
+    assert!(frame.width() >= 16, "decoded width should be at least 16");
+    assert!(frame.height() >= 16, "decoded height should be at least 16");
+}
+
+#[test]
+fn test_openh264_decode_iframe() {
+    let avc_data = generate_test_avc_bitstream();
+
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+    let frame = decoder.decode(&avc_data).expect("decode should succeed");
+
+    // Verify RGBA output dimensions and data
+    assert_eq!(frame.width(), 16);
+    assert_eq!(frame.height(), 16);
+    assert_eq!(frame.data().len(), 16 * 16 * 4, "RGBA data should be 16x16x4 bytes");
+}
+
+#[test]
+fn test_openh264_decoder_reset() {
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+
+    // Decode a frame to populate internal state
+    let avc_data = generate_test_avc_bitstream();
+    let _ = decoder.decode(&avc_data);
+
+    // Reset should not panic
+    decoder.reset();
+
+    // Decoder should still be usable after reset
+    let frame = decoder.decode(&avc_data).expect("decode after reset should succeed");
+    assert_eq!(frame.width(), 16);
+    assert_eq!(frame.height(), 16);
+}
+
+// ============================================================================
+// Annex B Input Tests
+// ============================================================================
+
+#[test]
+fn test_openh264_decode_annex_b() {
+    // MS-RDPEGFX specifies an Annex B byte stream; it must decode as sent.
+    let annex_b = generate_test_annex_b_bitstream();
+    assert!(annex_b.starts_with(&[0x00, 0x00, 0x00, 0x01]));
+
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+    let frame = decoder.decode(&annex_b).expect("Annex B decode should succeed");
+    assert_eq!(frame.width(), 16);
+    assert_eq!(frame.height(), 16);
+}
+
+#[test]
+fn test_openh264_decode_annex_b_with_access_unit_delimiter() {
+    // GNOME Remote Desktop starts each frame with an access unit delimiter
+    // (NAL type 9). Read as AVC format, `00 00 00 01` becomes a 1-byte NAL
+    // and the bytes after it a bogus length, so the frame never decodes.
+    let mut annex_b = vec![0x00, 0x00, 0x00, 0x01, 0x09, 0x10];
+    annex_b.extend_from_slice(&generate_test_annex_b_bitstream());
+
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+    let frame = decoder
+        .decode(&annex_b)
+        .expect("Annex B decode with an access unit delimiter should succeed");
+    assert_eq!(frame.width(), 16);
+    assert_eq!(frame.height(), 16);
+}
+
+#[test]
+fn test_openh264_decode_annex_b_three_byte_start_codes() {
+    // Annex B also allows 3-byte start codes (00 00 01).
+    let annex_b = generate_test_annex_b_bitstream();
+    let mut short_codes = Vec::with_capacity(annex_b.len());
+    let mut i = 0;
+    while i < annex_b.len() {
+        if annex_b[i..].starts_with(&[0x00, 0x00, 0x00, 0x01]) {
+            short_codes.extend_from_slice(&[0x00, 0x00, 0x01]);
+            i += 4;
+        } else {
+            short_codes.push(annex_b[i]);
+            i += 1;
+        }
+    }
+    assert!(short_codes.starts_with(&[0x00, 0x00, 0x01]));
+
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+    let frame = decoder
+        .decode(&short_codes)
+        .expect("Annex B decode with 3-byte start codes should succeed");
+    assert_eq!(frame.width(), 16);
+    assert_eq!(frame.height(), 16);
+}
+
+#[test]
+fn test_openh264_decode_annex_b_that_also_parses_as_avc() {
+    // `00 00 01 67` read as a length is 0x167 = 359, so a 363-byte Annex B
+    // buffer that starts with a 3-byte start code and an SPS is also a
+    // well-formed one-unit AVC buffer. The start code must win. Trailing
+    // zero bytes are allowed after the last NAL unit in Annex B.
+    let mut annex_b = vec![0x00, 0x00, 0x01];
+    annex_b.extend_from_slice(&generate_test_annex_b_bitstream()[4..]);
+    assert!(annex_b.starts_with(&[0x00, 0x00, 0x01, 0x67]));
+    assert!(annex_b.len() <= 363, "test frame too large: {}", annex_b.len());
+    annex_b.resize(363, 0);
+
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+    let frame = decoder
+        .decode(&annex_b)
+        .expect("Annex B that also parses as AVC should decode as Annex B");
+    assert_eq!(frame.width(), 16);
+    assert_eq!(frame.height(), 16);
+    assert!(!ironrdp_egfx::pdu::is_avc_format(&annex_b));
+}
+
+#[test]
+fn test_is_avc_format() {
+    use ironrdp_egfx::pdu::is_avc_format;
+
+    let annex_b = generate_test_annex_b_bitstream();
+    assert!(!is_avc_format(&annex_b));
+    assert!(is_avc_format(&annex_b_to_avc(&annex_b)));
+    assert!(!is_avc_format(&[]));
+    // A length that runs past the end is not AVC format.
+    assert!(!is_avc_format(&[0x00, 0x00, 0x00, 0x09, 0x67]));
+}
+
+// ============================================================================
+// Error Path Tests
+// ============================================================================
+
+#[test]
+fn test_decode_empty_input() {
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+
+    // Empty input has no NAL units, so OpenH264 returns no picture.
+    let result = decoder.decode(&[]);
+    assert!(result.is_err(), "decoding empty input should fail");
+}
+
+#[test]
+fn test_decode_truncated_nal_length() {
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+
+    // Less than 4 bytes: can't even read a NAL length prefix, so the input
+    // is passed to OpenH264 as Annex B, which finds no picture in it.
+    let result = decoder.decode(&[0x00, 0x00]);
+    assert!(result.is_err(), "truncated NAL length should fail");
+}
+
+#[test]
+fn test_decode_nal_length_exceeds_buffer() {
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+
+    // NAL length says 100 bytes but only 2 bytes follow, so the input is not
+    // valid AVC framing. It is passed to OpenH264 as Annex B, which finds no
+    // picture in it.
+    let mut data = Vec::new();
+    data.extend_from_slice(&100u32.to_be_bytes());
+    data.extend_from_slice(&[0x67, 0x00]); // Partial NAL
+    let result = decoder.decode(&data);
+    assert!(result.is_err(), "oversized NAL length should fail");
+}
+
+#[test]
+fn test_decode_garbage_input() {
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+
+    // Valid AVC framing (length prefix) but garbage NAL content.
+    // OpenH264 should either return an error or no picture.
+    let nal_data = [0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA];
+    let mut data = Vec::new();
+
+    #[expect(clippy::as_conversions, reason = "test data length")]
+    let len = nal_data.len() as u32;
+    data.extend_from_slice(&len.to_be_bytes());
+    data.extend_from_slice(&nal_data);
+
+    let result = decoder.decode(&data);
+    // OpenH264 may return Ok(no picture) which our decoder converts to an error,
+    // or it may return a decode error directly. Either way it shouldn't succeed
+    // with a valid frame.
+    assert!(result.is_err(), "garbage NAL content should not produce a valid frame");
+}
+
+// ============================================================================
+// Color Range Tests
+// ============================================================================
+
+/// Encode a YUV420p frame with the given luma/chroma planes and dimensions
+/// and decode it back through `OpenH264Decoder`, returning the RGBA output.
+fn encode_and_decode_yuv(
+    planes: (&[u8], &[u8], &[u8]),
+    dimensions: (usize, usize),
+    strides: (usize, usize, usize),
+) -> ironrdp_egfx::decode::DecodedFrame {
+    use openh264::encoder::Encoder;
+    use openh264::formats::YUVSlices;
+
+    let mut encoder = Encoder::new().expect("encoder should initialize");
+    let yuv = YUVSlices::new(planes, dimensions, strides);
+    let bitstream = encoder.encode(&yuv).expect("encode should succeed").to_vec();
+
+    let avc_data = annex_b_to_avc(&bitstream);
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+    decoder.decode(&avc_data).expect("decode should succeed")
+}
+
+#[test]
+fn test_decode_preserves_full_luma_range() {
+    // MS-RDPEGFX AVC420 is full range, so luma must pass through the
+    // YUV-to-RGBA conversion undistorted. A limited-range (studio swing)
+    // conversion over-expands: near-white luma is pulled past 255 and
+    // clamps there, near-black luma is pulled below 0 and clamps there.
+    // Values right at 255/0 survive either conversion after clamping, so
+    // the discriminating cases sit just inside the extremes.
+    // 16x16 with padded strides: the Y plane stride (24) exceeds its
+    // visible width, exercising the macroblock-alignment handling that
+    // prevents diagonal streaks; chroma stays at half resolution.
+    let (y, u, v) = ([245u8; 16 * 24], [128u8; 8 * 12], [128u8; 8 * 12]);
+    let near_white = encode_and_decode_yuv((&y, &u, &v), (16, 16), (24, 12, 12));
+    let data = near_white.data();
+    for px in data.chunks_exact(4) {
+        // A limited-range conversion clamps this to 255.
+        assert!(px[0] < 252, "near-white R channel saturated: {}", px[0]);
+        assert!(px[1] < 252, "near-white G channel saturated: {}", px[1]);
+        assert!(px[2] < 252, "near-white B channel saturated: {}", px[2]);
+        assert_eq!(px[3], 255);
+    }
+
+    let (y, u, v) = ([10u8; 16 * 24], [128u8; 8 * 12], [128u8; 8 * 12]);
+    let near_black = encode_and_decode_yuv((&y, &u, &v), (16, 16), (24, 12, 12));
+    let data = near_black.data();
+    for px in data.chunks_exact(4) {
+        // A limited-range conversion clamps this to 0.
+        assert!(px[0] > 4, "near-black R channel crushed: {}", px[0]);
+        assert!(px[1] > 4, "near-black G channel crushed: {}", px[1]);
+        assert!(px[2] > 4, "near-black B channel crushed: {}", px[2]);
+    }
+}
+
+#[test]
+fn test_decode_uses_bt709_chroma_matrix() {
+    // Neutral chroma cannot distinguish BT.601 from BT.709; both matrices
+    // agree on grayscale. Encode a saturated red tile (YUV planes fed
+    // directly, bypassing the encoder's own RGB conversion) and verify the
+    // decoded pixels sit near pure red under the spec's BT.709 inverse
+    // (MS-RDPEGFX 3.3.8.3.1, image14). Under a full-range BT.601 inverse
+    // the same planes decode with R at roughly 231, failing the R bound
+    // (the G bound does not discriminate there: 601's G goes negative and
+    // clamps to 0).
+    //
+    // BT.709 full-range forward on pure red: Y = (54·255) >> 8 = 53,
+    // U = (-29·255) >> 8 + 128 = 99, V = (128·255) >> 8 + 128 = 255.
+    let y = [53u8; 16 * 16];
+    let u = [99u8; 8 * 8];
+    let v = [255u8; 8 * 8];
+    let red = encode_and_decode_yuv((&y, &u, &v), (16, 16), (16, 8, 8));
+    let data = red.data();
+    for px in data.chunks_exact(4) {
+        assert!(px[0] > 245, "red R channel: {}", px[0]);
+        assert!(px[1] < 20, "red G channel leaked: {}", px[1]);
+        assert!(px[2] < 20, "red B channel leaked: {}", px[2]);
+    }
+}
+
+// ============================================================================
+// AVC444 Through a Real H.264 Stream
+// ============================================================================
+
+/// The main and auxiliary views of a picture go through one OpenH264 encoder and one decoder,
+/// as MS-RDPEGFX 2.2.4.5 requires, and recombine into a picture closer to the original than
+/// the main view alone.
+// oracle: spec MS-RDPEGFX §2.2.4.5
+#[rstest::rstest]
+#[case::avc444(ironrdp_egfx::avc444::Avc444Layout::V1)]
+#[case::avc444v2(ironrdp_egfx::avc444::Avc444Layout::V2)]
+fn test_openh264_avc444_views_recombine(#[case] layout: ironrdp_egfx::avc444::Avc444Layout) {
+    use ironrdp_egfx::avc444::Yuv444Frame;
+    use ironrdp_egfx::decode::Yuv420Frame;
+    use ironrdp_pdu::geometry::ExclusiveRectangle;
+    use openh264::encoder::Encoder;
+    use openh264::formats::YUVSlices;
+
+    const SIZE: u16 = 64;
+    // Stripes of saturated colors one pixel wide, which 4:2:0 subsampling blurs.
+    let mut original = Vec::new();
+    for _ in 0..SIZE {
+        for x in 0..SIZE {
+            let pixel = if x % 2 == 0 { [230, 40, 40] } else { [40, 60, 230] };
+            original.extend_from_slice(&pixel);
+            original.push(0xFF);
+        }
+    }
+    let picture = Yuv444Frame::from_rgba(&original, SIZE, SIZE).expect("picture");
+    let (main, auxiliary) = picture.split(layout).expect("views");
+
+    let mut encoder = Encoder::new().expect("encoder should initialize");
+    let mut decoder = OpenH264Decoder::new().expect("decoder should initialize");
+    let mut round_trip = |view: &Yuv420Frame| {
+        let y: Vec<u8> = (0..).map_while(|row| view.luma_row(row)).flatten().copied().collect();
+        let u: Vec<u8> = (0..).map_while(|row| view.u_row(row)).flatten().copied().collect();
+        let v: Vec<u8> = (0..).map_while(|row| view.v_row(row)).flatten().copied().collect();
+        let (width, height) = (usize::from(view.width()), usize::from(view.height()));
+        let yuv = YUVSlices::new((&y, &u, &v), (width, height), (width, width / 2, width / 2));
+        let bitstream = encoder.encode(&yuv).expect("encode should succeed").to_vec();
+        decoder.decode_yuv420(&bitstream).expect("decode should succeed")
+    };
+    let main = round_trip(&main);
+    let auxiliary = round_trip(&auxiliary);
+
+    let everything = ExclusiveRectangle {
+        left: 0,
+        top: 0,
+        right: SIZE,
+        bottom: SIZE,
+    };
+    let mut combined = Yuv444Frame::new(SIZE, SIZE);
+    combined.apply_main_view(&main, core::slice::from_ref(&everything));
+    let subsampled = combined.to_rgba(&everything);
+    combined.apply_auxiliary_view(layout, &auxiliary, core::slice::from_ref(&everything));
+    let recombined = combined.to_rgba(&everything);
+
+    let mean_error = |picture: &[u8]| {
+        let total: u64 = picture
+            .iter()
+            .zip(&original)
+            .map(|(actual, expected)| u64::from(actual.abs_diff(*expected)))
+            .sum();
+        total / u64::try_from(picture.len()).expect("length fits in u64")
+    };
+    let (avc420_error, avc444_error) = (mean_error(&subsampled), mean_error(&recombined));
+    assert!(
+        avc444_error * 4 < avc420_error,
+        "AVC444 error {avc444_error} is not well below the 4:2:0 error {avc420_error}"
+    );
+}

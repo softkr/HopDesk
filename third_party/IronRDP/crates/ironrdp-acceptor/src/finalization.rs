@@ -1,0 +1,315 @@
+use ironrdp_connector::{
+    ConnectorError, ConnectorErrorExt as _, ConnectorResult, MonotonicInstant, Sequence, State, Written, general_err,
+};
+use ironrdp_core::{WriteBuf, decode};
+use ironrdp_pdu::x224::X224;
+use ironrdp_pdu::{mcs, rdp};
+use tracing::debug;
+
+use crate::util::{self, wrap_share_data};
+
+const MAX_INPUT_BACKLOG_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+pub(crate) struct InputEventBuffer {
+    events: Vec<Vec<u8>>,
+    /// INVARIANT: `bytes <= MAX_INPUT_BACKLOG_BYTES`.
+    bytes: usize,
+}
+
+impl InputEventBuffer {
+    pub(crate) fn push(&mut self, input: &[u8]) -> ConnectorResult<()> {
+        // Per invariant: bytes <= MAX_INPUT_BACKLOG_BYTES, so this subtraction does not underflow.
+        if MAX_INPUT_BACKLOG_BYTES - self.bytes < input.len() {
+            return Err(general_err!("input event backlog exceeds 16 MiB"));
+        }
+        self.bytes += input.len();
+        self.events.push(input.to_vec());
+        Ok(())
+    }
+
+    fn into_events(self) -> Vec<Vec<u8>> {
+        self.events
+    }
+}
+
+/// Server side of the Connection Finalization phase of the [1.3.1.1] Connection Sequence.
+///
+/// Once a step fails, or once the finalization is finished, further steps return an error.
+/// A finished sequence stays finished: [`FinalizationSequence::is_done`] still returns true after such a step.
+///
+/// [1.3.1.1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/023f1e69-cfe8-4ee6-9ee0-7e759fb4e4ee
+#[derive(Debug)]
+pub struct FinalizationSequence {
+    state: FinalizationState,
+    user_channel_id: u16,
+    io_channel_id: u16,
+
+    input_events: InputEventBuffer,
+}
+
+#[derive(Default, Debug)]
+pub enum FinalizationState {
+    #[default]
+    Consumed,
+
+    WaitSynchronize,
+    WaitControlCooperate,
+    WaitRequestControl,
+    WaitFontList,
+
+    SendSynchronizeConfirm,
+    SendControlCooperateConfirm,
+    SendGrantedControlConfirm,
+    SendFontMap,
+
+    Finished,
+}
+
+impl State for FinalizationState {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Consumed => "Consumed",
+            Self::WaitSynchronize => "WaitSynchronize",
+            Self::WaitControlCooperate => "WaitControlCooperate",
+            Self::WaitRequestControl => "WaitRequestControl",
+            Self::WaitFontList => "WaitFontList",
+            Self::SendSynchronizeConfirm => "SendSynchronizeConfirm",
+            Self::SendControlCooperateConfirm => "SendControlCooperateConfirm",
+            Self::SendGrantedControlConfirm => "SendGrantedControlConfirm",
+            Self::SendFontMap => "SendFontMap",
+            Self::Finished => "Finished",
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        matches!(self, Self::Finished { .. })
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+impl Sequence for FinalizationSequence {
+    fn next_pdu_hint(&self) -> Option<&dyn ironrdp_pdu::PduHint> {
+        match &self.state {
+            FinalizationState::Consumed => None,
+            FinalizationState::WaitSynchronize => Some(&ironrdp_pdu::X224Hint),
+            FinalizationState::WaitControlCooperate => Some(&ironrdp_pdu::X224Hint),
+            FinalizationState::WaitRequestControl => Some(&ironrdp_pdu::X224Hint),
+            FinalizationState::WaitFontList => Some(&ironrdp_pdu::RdpHint),
+            FinalizationState::SendSynchronizeConfirm => None,
+            FinalizationState::SendControlCooperateConfirm => None,
+            FinalizationState::SendGrantedControlConfirm => None,
+            FinalizationState::SendFontMap => None,
+            FinalizationState::Finished => None,
+        }
+    }
+
+    fn state(&self) -> &dyn State {
+        &self.state
+    }
+
+    fn step(
+        &mut self,
+        input: &[u8],
+        _received_at: Option<MonotonicInstant>,
+        output: &mut WriteBuf,
+    ) -> ConnectorResult<Written> {
+        let prev_state = core::mem::take(&mut self.state);
+        if matches!(
+            prev_state,
+            FinalizationState::WaitSynchronize
+                | FinalizationState::WaitControlCooperate
+                | FinalizationState::WaitRequestControl
+                | FinalizationState::WaitFontList
+        ) && let Ok(X224(data)) = decode::<X224<mcs::SendDataRequest<'_>>>(input)
+            && data.channel_id != self.io_channel_id
+        {
+            self.input_events.push(input)?;
+            self.state = prev_state;
+            return Ok(Written::Nothing);
+        }
+
+        let (written, next_state) = match prev_state {
+            FinalizationState::WaitSynchronize => {
+                let synchronize = decode_share_control(input);
+
+                debug!(message = ?synchronize, "Received");
+
+                (Written::Nothing, FinalizationState::WaitControlCooperate)
+            }
+
+            FinalizationState::WaitControlCooperate => {
+                let cooperate = decode_share_control(input);
+
+                debug!(message = ?cooperate, "Received");
+
+                (Written::Nothing, FinalizationState::WaitRequestControl)
+            }
+
+            FinalizationState::WaitRequestControl => {
+                let control = decode_share_control(input)?;
+
+                debug!(message = ?control, "Received");
+
+                (Written::Nothing, FinalizationState::WaitFontList)
+            }
+
+            FinalizationState::WaitFontList => match decode_font_list(input) {
+                Ok(font_list) => {
+                    debug!(message = ?font_list, "Received");
+
+                    (Written::Nothing, FinalizationState::SendSynchronizeConfirm)
+                }
+
+                Err(()) => {
+                    self.input_events.push(input)?;
+
+                    (Written::Nothing, FinalizationState::WaitFontList)
+                }
+            },
+
+            FinalizationState::SendSynchronizeConfirm => {
+                let synchronize_confirm = create_synchronize_confirm();
+
+                debug!(message = ?synchronize_confirm, "Send");
+
+                let share_data = wrap_share_data(synchronize_confirm, self.io_channel_id);
+                let written =
+                    util::encode_send_data_indication(self.user_channel_id, self.io_channel_id, &share_data, output)?;
+
+                (
+                    Written::from_size(written)?,
+                    FinalizationState::SendControlCooperateConfirm,
+                )
+            }
+
+            FinalizationState::SendControlCooperateConfirm => {
+                let cooperate_confirm = create_cooperate_confirm();
+
+                debug!(message = ?cooperate_confirm, "Send");
+
+                let share_data = wrap_share_data(cooperate_confirm, self.io_channel_id);
+                let written =
+                    util::encode_send_data_indication(self.user_channel_id, self.io_channel_id, &share_data, output)?;
+
+                (
+                    Written::from_size(written)?,
+                    FinalizationState::SendGrantedControlConfirm,
+                )
+            }
+
+            FinalizationState::SendGrantedControlConfirm => {
+                let control_confirm = create_control_confirm(self.user_channel_id);
+
+                debug!(message = ?control_confirm, "Send");
+
+                let share_data = wrap_share_data(control_confirm, self.io_channel_id);
+                let written =
+                    util::encode_send_data_indication(self.user_channel_id, self.io_channel_id, &share_data, output)?;
+
+                (Written::from_size(written)?, FinalizationState::SendFontMap)
+            }
+
+            FinalizationState::SendFontMap => {
+                let font_map = create_font_map();
+
+                debug!(message = ?font_map, "Send");
+
+                let share_data = wrap_share_data(font_map, self.io_channel_id);
+                let written =
+                    util::encode_send_data_indication(self.user_channel_id, self.io_channel_id, &share_data, output)?;
+
+                (Written::from_size(written)?, FinalizationState::Finished)
+            }
+
+            FinalizationState::Consumed => {
+                return Err(general_err!("finalization state consumed by a failed step"));
+            }
+
+            FinalizationState::Finished => {
+                // The finished state is put back so that `is_done` stays true after a stray step.
+                self.state = FinalizationState::Finished;
+                return Err(general_err!("finalization already finished"));
+            }
+        };
+
+        self.state = next_state;
+        Ok(written)
+    }
+}
+
+impl FinalizationSequence {
+    pub fn new(user_channel_id: u16, io_channel_id: u16) -> Self {
+        Self {
+            state: FinalizationState::WaitSynchronize,
+            user_channel_id,
+            io_channel_id,
+            input_events: InputEventBuffer::default(),
+        }
+    }
+
+    pub(crate) fn with_input_events(mut self, input_events: InputEventBuffer) -> Self {
+        self.input_events = input_events;
+        self
+    }
+
+    pub fn into_input_events(self) -> Vec<Vec<u8>> {
+        self.input_events.into_events()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.state.is_terminal()
+    }
+}
+
+fn create_synchronize_confirm() -> rdp::headers::ShareDataPdu {
+    rdp::headers::ShareDataPdu::Synchronize(rdp::finalization_messages::SynchronizePdu { target_user_id: 0 })
+}
+
+fn create_cooperate_confirm() -> rdp::headers::ShareDataPdu {
+    rdp::headers::ShareDataPdu::Control(rdp::finalization_messages::ControlPdu {
+        action: rdp::finalization_messages::ControlAction::Cooperate,
+        grant_id: 0,
+        control_id: 0,
+    })
+}
+
+fn create_control_confirm(user_id: u16) -> rdp::headers::ShareDataPdu {
+    rdp::headers::ShareDataPdu::Control(rdp::finalization_messages::ControlPdu {
+        action: rdp::finalization_messages::ControlAction::GrantedControl,
+        grant_id: user_id,
+        control_id: u32::from(rdp::capability_sets::SERVER_CHANNEL_ID),
+    })
+}
+
+fn create_font_map() -> rdp::headers::ShareDataPdu {
+    rdp::headers::ShareDataPdu::FontMap(rdp::finalization_messages::FontPdu::default())
+}
+
+fn decode_share_control(input: &[u8]) -> ConnectorResult<rdp::headers::ShareControlHeader> {
+    let data_request = decode::<X224<mcs::SendDataRequest<'_>>>(input)
+        .map_err(ConnectorError::decode)
+        .map(|p| p.0)?;
+    let share_control =
+        decode::<rdp::headers::ShareControlHeader>(data_request.user_data.as_ref()).map_err(ConnectorError::decode)?;
+    Ok(share_control)
+}
+
+fn decode_font_list(input: &[u8]) -> Result<rdp::finalization_messages::FontPdu, ()> {
+    use ironrdp_pdu::rdp::headers::{ShareControlPdu, ShareDataPdu};
+
+    let share_control = decode_share_control(input).map_err(|_| ())?;
+
+    let ShareControlPdu::Data(data_pdu) = share_control.share_control_pdu else {
+        return Err(());
+    };
+
+    let ShareDataPdu::FontList(font_pdu) = data_pdu.share_data_pdu else {
+        return Err(());
+    };
+
+    Ok(font_pdu)
+}

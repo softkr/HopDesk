@@ -1,0 +1,6 @@
+lib_name = "DevolutionsIronRdp"
+
+[dotnet]
+namespace = "Devolutions.IronRdp"
+exception_trim_suffix = "Error"
+exception_message_method = "ToDisplay"

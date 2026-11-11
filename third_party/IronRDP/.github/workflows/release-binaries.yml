@@ -1,0 +1,362 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  # Manual re-run path: when the release-triggered run fails (e.g. a bug in this
+  # workflow), a UI re-run reuses the workflow file at the tag's commit, so a fix
+  # merged to the default branch would NOT take effect. Dispatching manually runs
+  # the fixed workflow from the default branch against an existing release tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)build binaries for (e.g. ironrdp-agent-v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  RUST_BACKTRACE: short
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+jobs:
+  select-package:
+    name: Select package
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.select.outputs.package }}
+      version: ${{ steps.select.outputs.version }}
+
+    steps:
+      - name: Select released CLI
+        id: select
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          case "$TAG_NAME" in
+            ironrdp-agent-v*)
+              package=ironrdp-agent
+              ;;
+            ironrdp-viewer-v*)
+              package=ironrdp-viewer
+              ;;
+            *)
+              exit 0
+              ;;
+          esac
+
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG_NAME#"$package-v"}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ needs.select-package.outputs.package }} [${{ matrix.target }}]
+    needs: select-package
+    if: ${{ needs.select-package.outputs.package != '' }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # `target` is each runner's native triple; it is passed to cargo (see the build step) so a
+        # runner/target mismatch fails the build loudly instead of silently mislabeling an asset.
+        # `os_arch` is the friendly, triple-free label used for the asset and artifact names.
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            os_arch: windows-x64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            os_arch: windows-arm64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            os_arch: linux-x64
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            os_arch: linux-arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            os_arch: macos-x64
+            macos_deployment_target: '10.13'
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            os_arch: macos-arm64
+            macos_deployment_target: '11.0'
+
+    steps:
+      # Keep the runner's logical paths intact for checkout, caching, artifacts and post steps.
+      # Never repurpose an existing volume or initialize storage on a self-hosted machine.
+      - name: Prepare Windows Arm build storage
+        if: runner.os == 'Windows' && runner.arch == 'ARM64' && runner.environment == 'github-hosted'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'runner architecture does not match the operating system'
+          }
+
+          $partitions = @(Get-Partition)
+          $volumes = @(Get-Volume)
+          $drives = @(Get-PSDrive -PSProvider FileSystem)
+          if (($partitions | Where-Object DriveLetter -eq 'D') -or
+              ($volumes | Where-Object DriveLetter -eq 'D') -or
+              ($drives | Where-Object Name -eq 'D')) {
+            Write-Host 'D: is already assigned; leaving storage and workspace unchanged'
+            return
+          }
+
+          $disks = @(Get-Disk | Where-Object {
+            $_.BusType -eq 'NVMe' -and $_.PartitionStyle -eq 'RAW' -and
+            -not $_.IsBoot -and -not $_.IsSystem -and
+            -not $_.IsOffline -and -not $_.IsReadOnly -and
+            $_.NumberOfPartitions -eq 0 -and $_.Size -ge 50GB -and
+            $_.Number -notin $partitions.DiskNumber
+          })
+          if ($disks.Count -ne 1) {
+            Write-Host "Found $($disks.Count) eligible raw NVMe disks; leaving storage and workspace unchanged"
+            return
+          }
+
+          $workspace = Get-Item -LiteralPath $env:GITHUB_WORKSPACE -Force
+          if (-not $workspace.PSIsContainer -or
+              ($workspace.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Write-Host 'Workspace is not an ordinary directory; leaving storage unchanged'
+            return
+          }
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
+          if (Test-Path -LiteralPath $cargoHome) {
+            $cargoDirectory = Get-Item -LiteralPath $cargoHome -Force
+            if (-not $cargoDirectory.PSIsContainer -or
+                ($cargoDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+              Write-Host 'Cargo home is not an ordinary directory; leaving storage unchanged'
+              return
+            }
+          }
+
+          # Create ReFS format drive (Dev Drive) with developer-workload defaults. AV is delayed by default for 
+          # dev drive. Any errors end the job here with a message as the runner is now in an unknown state.  
+          $disk = $disks[0]
+          Write-Host "Initializing unused NVMe disk $($disk.Number) ($($disk.Size) bytes)"
+          $partition = Initialize-Disk -InputObject $disk -PartitionStyle GPT -PassThru |
+            New-Partition -UseMaximumSize -DriveLetter D
+          $volume = $partition | Format-Volume -DevDrive -FileSystem ReFS -NewFileSystemLabel 'Build' -Confirm:$false
+          if ($volume.FileSystem -ne 'ReFS' -or $volume.DriveLetter -ne 'D') {
+            throw 'new build volume is not ReFS on D:'
+          }
+
+          # Preserve files left by pre-job hooks, including hidden entries and links.
+          # Keep the original populated directory as a job-lifetime backup after copying.
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          [Environment]::CurrentDirectory = $env:RUNNER_TEMP
+          if (@(Get-ChildItem -LiteralPath $workspace.FullName -Force).Count -eq 0) {
+            Move-Item -LiteralPath $workspace.FullName -Destination 'D:\workspace'
+          } else {
+            robocopy $workspace.FullName 'D:\workspace' /E /COPY:DAT /DCOPY:DAT /SL /SJ /R:2 /W:1 /NP
+            if ($LASTEXITCODE -ge 8) { throw "workspace copy failed with robocopy exit code $LASTEXITCODE" }
+            $LASTEXITCODE = 0
+            Move-Item -LiteralPath $workspace.FullName -Destination "$($workspace.FullName).before-refs-$([guid]::NewGuid())"
+          }
+          New-Item -ItemType Junction -Path $workspace.FullName -Target 'D:\workspace' | Out-Null
+
+          # Give rust-cache the physical Cargo path: paths relative to the old C: workspace
+          # would otherwise traverse the junction's parents on D: when GNU tar saves/restores.
+          if (Test-Path -LiteralPath $cargoHome) {
+            Move-Item -LiteralPath $cargoHome -Destination 'D:\cargo-home'
+          } else {
+            New-Item -ItemType Directory -Path 'D:\cargo-home' | Out-Null
+          }
+          New-Item -ItemType Junction -Path $cargoHome -Target 'D:\cargo-home' | Out-Null
+          New-Item -ItemType Directory -Path 'D:\build-temp' | Out-Null
+          "CARGO_HOME=D:\cargo-home" >> $env:GITHUB_ENV
+          "TEMP=D:\build-temp" >> $env:GITHUB_ENV
+          "TMP=D:\build-temp" >> $env:GITHUB_ENV
+          Write-Host 'Workspace, Cargo source caches and compiler temporary files now use D: (ReFS)'
+
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Install build dependencies
+        uses: ./.github/actions/install-build-deps
+
+      # Inlined rather than ./.github/actions/prune-rust-toolchains because the checkout is the
+      # release tag, which may predate that action.
+      - name: Prune Rust toolchains
+        shell: bash
+        run: |
+          rustup toolchain install
+          pinned="$(rustup show active-toolchain | tr -d '\r' | cut -d' ' -f1)"
+          rustup default "$pinned"
+          rustup toolchain list --quiet | tr -d '\r' | while read -r toolchain; do
+            if [ "$toolchain" != "$pinned" ]; then
+              rustup toolchain uninstall "$toolchain"
+            fi
+          done
+          rustup toolchain list
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Build release binary
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_OS -eq 'Windows') {
+            $env:RUSTFLAGS = '-C target-feature=+crt-static'
+          }
+
+          if ($env:RUNNER_OS -eq 'macOS') {
+            $env:MACOSX_DEPLOYMENT_TARGET = '${{ matrix.macos_deployment_target }}'
+          }
+
+          rustup target add '${{ matrix.target }}'
+          cargo build --locked --release --target '${{ matrix.target }}' --package '${{ needs.select-package.outputs.package }}'
+
+      - name: Package binary
+        shell: pwsh
+        env:
+          PACKAGE: ${{ needs.select-package.outputs.package }}
+          VERSION: ${{ needs.select-package.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          OS_ARCH: ${{ matrix.os_arch }}
+        run: |
+          $extension = if ($env:RUNNER_OS -eq 'Windows') { '.exe' } else { '' }
+          $binary = Join-Path (Join-Path (Join-Path 'target' $env:TARGET) 'release') "$env:PACKAGE$extension"
+          $assetName = "$env:PACKAGE-$env:VERSION-$env:OS_ARCH.tar.gz"
+          $assetDirectory = 'release-assets'
+
+          New-Item -ItemType Directory -Force -Path $assetDirectory | Out-Null
+          Copy-Item $binary (Join-Path $assetDirectory "$env:PACKAGE$extension")
+
+          Push-Location $assetDirectory
+          tar -czf $assetName "$env:PACKAGE$extension"
+          $hash = (Get-FileHash -Algorithm SHA256 $assetName).Hash.ToLowerInvariant()
+          "$hash  $assetName" | Set-Content -NoNewline -Encoding ascii "$assetName.sha256"
+          Remove-Item "$env:PACKAGE$extension"
+          Pop-Location
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets-${{ matrix.os_arch }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 1
+          # Allow a full "Re-run all jobs" (the recovery path) to re-upload over a prior attempt's
+          # artifact of the same name instead of failing.
+          overwrite: true
+
+  publish:
+    name: Upload release assets
+    needs: [select-package, build]
+    # All-or-nothing on purpose: with `fail-fast: false`, if any one of the matrix legs fails,
+    # `needs.build.result` is not 'success' and NO assets are uploaded, rather than publishing a
+    # partial set. The Release itself is already published by release-plz, so a failed build leaves
+    # it without binaries; recovery is re-running this workflow. The final `gh release upload
+    # --clobber` and the notes step below are both idempotent, so re-runs are safe.
+    if: ${{ always() && needs.select-package.outputs.package != '' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG_NAME" release-assets/* --clobber
+
+      - name: Update release notes with install instructions
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
+          PACKAGE: ${{ needs.select-package.outputs.package }}
+          VERSION: ${{ needs.select-package.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $begin = '<!-- BEGIN prebuilt-binaries -->'
+          $end = '<!-- END prebuilt-binaries -->'
+
+          # Literal template: the ${PACKAGE}/${VERSION} placeholders are substituted below; the tag is
+          # derived as ${PACKAGE}-v${VERSION}. Example variables ($ASSET, $BASE, $Asset) stay literal
+          # because the here-string is single-quoted (no interpolation).
+          $template = @'
+          <!-- BEGIN prebuilt-binaries -->
+          ## Prebuilt binaries
+
+          Prebuilt, checksummed archives of `${PACKAGE}` are attached to this release:
+
+          ${ASSET_LIST}
+
+          Each archive has a matching `.sha256` sidecar. The Windows archive contains `${PACKAGE}.exe`;
+          the others contain the bare `${PACKAGE}` executable.
+
+          ### Download and verify
+
+          Pick an archive from the list above, then download, verify, and extract it. The two blocks
+          below are self-contained; use the one for your platform.
+
+          Linux and macOS (POSIX shell):
+
+          ```shell
+          ASSET="<archive name from the list above>"
+          BASE="https://github.com/Devolutions/IronRDP/releases/download/${PACKAGE}-v${VERSION}"
+          curl -fLO "$BASE/$ASSET"
+          curl -fLO "$BASE/$ASSET.sha256"
+          sha256sum --check "$ASSET.sha256"   # on macOS: shasum -a 256 --check "$ASSET.sha256"
+          tar -xzf "$ASSET"
+          ```
+
+          Windows (PowerShell):
+
+          ```powershell
+          $Asset = "<archive name from the list above>"
+          $Base = "https://github.com/Devolutions/IronRDP/releases/download/${PACKAGE}-v${VERSION}"
+          curl.exe -fLO "$Base/$Asset"
+          curl.exe -fLO "$Base/$Asset.sha256"
+          if ((Get-FileHash -Algorithm SHA256 $Asset).Hash.ToLowerInvariant() -ne (Get-Content "$Asset.sha256").Split(' ')[0]) { throw 'checksum mismatch' }
+          tar -xzf $Asset
+          ```
+
+          ### Build baselines
+
+          - Linux archives are built on Ubuntu 22.04 and require glibc 2.35 or later.
+          - macOS archives target macOS 10.13 or later on Intel and macOS 11.0 or later on Apple Silicon.
+
+          Assets are attached to this release (tag `${PACKAGE}-v${VERSION}`). Don't rely on the `latest` release URL:
+          releases are tagged per package (`ironrdp-agent-v*`, `ironrdp-viewer-v*`), so `latest` may resolve
+          to the other package.
+          <!-- END prebuilt-binaries -->
+          '@
+
+          # Build the asset list from the archives actually attached to this release, so it can never
+          # drift from the build matrix (adding/renaming a target updates the notes automatically).
+          $assetList = (Get-ChildItem -Path release-assets -Filter *.tar.gz | Sort-Object Name | ForEach-Object { "- ``$($_.Name)``" }) -join "`n"
+
+          $block = $template.Replace('${PACKAGE}', $env:PACKAGE).Replace('${VERSION}', $env:VERSION).Replace('${ASSET_LIST}', $assetList)
+
+          $body = (gh release view $env:TAG_NAME --json body -q .body | Out-String).TrimEnd()
+
+          # Idempotent inject: replace the sentinel-delimited region if present, otherwise append.
+          $beginIndex = $body.IndexOf($begin)
+          $endIndex = $body.IndexOf($end)
+          if ($beginIndex -ge 0 -and $endIndex -ge 0) {
+            $newBody = $body.Substring(0, $beginIndex) + $block + $body.Substring($endIndex + $end.Length)
+          } else {
+            $newBody = if ($body) { "$body`n`n$block" } else { $block }
+          }
+
+          Set-Content -Path newbody.md -Value $newBody -Encoding utf8
+          gh release edit $env:TAG_NAME --notes-file newbody.md

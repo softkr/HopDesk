@@ -1,0 +1,779 @@
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
+using Avalonia.Threading;
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Net.Security;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using Avalonia.Markup.Xaml;
+using Avalonia.Interactivity;
+using Image = Avalonia.Controls.Image;
+
+namespace Devolutions.IronRdp.AvaloniaExample;
+
+public partial class MainWindow : Window
+{
+    const int BytesPerPixel = 4;
+    static readonly TimeSpan ClipboardTimeoutsInterval = TimeSpan.FromSeconds(5);
+    static readonly TimeSpan RdpdrDeferredPollInterval = TimeSpan.FromMilliseconds(50);
+
+    readonly InputDatabase? _inputDatabase = InputDatabase.New();
+    ActiveStage? _activeStage;
+    DecodedImage? _decodedImage;
+    // With software pointer rendering, input also redraws the pointer in the image, which needs the stage lock.
+    bool _pointerSoftwareRendering;
+    byte[]? _frameBuffer;
+    readonly object _stageLock = new();
+    Framed<Stream>? _framed;
+    // Cancels the connection sequence and the PDU read loop when the session ends or the window closes.
+    CancellationTokenSource? _sessionCts;
+    // Set by the read loop while another PDU is already buffered: Render then copies pixels but leaves
+    // presenting to Present, so a burst of updates draws once.
+    volatile bool _deferPresent;
+    bool _presentPending;
+    WinCliprdr? _cliprdr;
+    private readonly RendererModel _renderModel;
+    private Image? _imageControl;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        Opened += OnOpened;
+
+        _renderModel = new RendererModel()
+        {
+            Width = 980,
+            Height = 780
+        };
+
+        this.DataContext = _renderModel;
+
+        Closing += (sender, e) =>
+        {
+            _sessionCts?.Cancel();
+            Environment.Exit(1);
+        };
+    }
+
+    private void InitializeComponent()
+    {
+        AvaloniaXamlLoader.Load(this);
+    }
+
+    protected override void OnSizeChanged(SizeChangedEventArgs e)
+    {
+        base.OnSizeChanged(e);
+        _renderModel.Width = (int)e.NewSize.Width;
+        _renderModel.Height = (int)e.NewSize.Height - 100;
+    }
+
+    private void Resize(double updatedWidth, double updatedHeight)
+    {
+        if (_activeStage != null)
+        {
+            var output = WithStageLock(() => _activeStage.EncodedResize((uint)updatedWidth, (uint)updatedHeight));
+            if (output == null)
+            {
+                return;
+            }
+
+            Task.Run(async () => { await HandleActiveStageOutput(output); });
+        }
+    }
+
+    private void OnOpened(object? sender, EventArgs e)
+    {
+        Log.InitWithEnv();
+
+        WindowState = WindowState.Maximized;
+
+        var username = Environment.GetEnvironmentVariable("IRONRDP_USERNAME");
+        var password = Environment.GetEnvironmentVariable("IRONRDP_PASSWORD");
+        var domain = Environment.GetEnvironmentVariable("IRONRDP_DOMAIN"); // Optional
+        var server = Environment.GetEnvironmentVariable("IRONRDP_SERVER");
+        var portEnv = Environment.GetEnvironmentVariable("IRONRDP_PORT"); // Optional
+
+        // Gateway configuration (optional)
+        var gatewayUrl = Environment.GetEnvironmentVariable("IRONRDP_GATEWAY_URL");
+        var gatewayToken = Environment.GetEnvironmentVariable("IRONRDP_GATEWAY_TOKEN");
+        var tokengenUrl = Environment.GetEnvironmentVariable("IRONRDP_TOKENGEN_URL");
+
+        if (username == null || password == null || server == null)
+        {
+            var errorMessage =
+                "Please set the IRONRDP_USERNAME, IRONRDP_PASSWORD, and IRONRDP_SERVER environment variables";
+            Trace.TraceError(errorMessage);
+            Close();
+            throw new InvalidProgramException(errorMessage);
+        }
+
+        // Validate server is only domain or IP (no port allowed)
+        // i.e. "example.com" or "10.10.0.3" the port should go to the dedicated env var IRONRDP_PORT
+        if (server.Contains(':'))
+        {
+            var errorMessage = $"IRONRDP_SERVER must be a domain or IP address only, not '{server}'. Use IRONRDP_PORT for the port.";
+            Trace.TraceError(errorMessage);
+            Close();
+            throw new InvalidProgramException(errorMessage);
+        }
+
+        // Parse port from environment variable or use default
+        int port = 3389;
+        if (!string.IsNullOrEmpty(portEnv))
+        {
+            if (!int.TryParse(portEnv, out port) || port <= 0 || port > 65535)
+            {
+                var errorMessage = $"IRONRDP_PORT must be a valid port number (1-65535), got '{portEnv}'";
+                Trace.TraceError(errorMessage);
+                Close();
+                throw new InvalidProgramException(errorMessage);
+            }
+        }
+
+        Trace.TraceInformation($"Target server: {server}:{port}");
+
+        var config = BuildConfig(username, password, domain, _renderModel.Width, _renderModel.Height);
+
+        CliprdrBackendFactory? factory = null;
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            // Created on the UI thread: pasting remote files needs its single-threaded apartment.
+            _cliprdr = WinCliprdr.NewWithFileTransfer(true);
+
+            if (_cliprdr != null)
+            {
+                factory = _cliprdr.BackendFactory();
+            }
+        }
+
+        BeforeConnectSetup();
+        Task.Run(async () =>
+        {
+            try
+            {
+                ConnectionResult res;
+                _sessionCts = new CancellationTokenSource();
+
+                // Determine connection mode: Gateway or Direct
+                if (!string.IsNullOrEmpty(gatewayUrl))
+                {
+                    Trace.TraceInformation("=== GATEWAY MODE ===");
+                    Trace.TraceInformation($"Gateway URL: {gatewayUrl}");
+                    Trace.TraceInformation($"Destination: {server}:{port}");
+
+                    var tokenGen = new TokenGenerator(tokengenUrl ?? "http://localhost:8080");
+
+                    // Generate RDP token if not provided
+                    if (string.IsNullOrEmpty(gatewayToken))
+                    {
+                        Trace.TraceInformation("No RDP token provided, generating token...");
+
+                        try
+                        {
+                            gatewayToken = await tokenGen.GenerateRdpTlsToken(
+                                dstHost: server!,
+                                proxyUser: string.IsNullOrEmpty(domain) ? username : $"{username}@{domain}",
+                                proxyPassword: password!,
+                                destUser: username!,
+                                destPassword: password!
+                            );
+                            Trace.TraceInformation($"RDP token generated successfully (length: {gatewayToken.Length})");
+                        }
+                        catch (Exception ex)
+                        {
+                            Trace.TraceError($"Failed to generate RDP token: {ex.Message}");
+                            Trace.TraceInformation("Make sure tokengen server is running:");
+                            Trace.TraceInformation($"  cargo run --manifest-path tools/tokengen/Cargo.toml -- server");
+                            throw;
+                        }
+                    }
+
+                    // Connect via gateway - destination needs "hostname:port" format for RDCleanPath
+                    string destination = $"{server}:{port}";
+
+                    var (gatewayRes, gatewayFramed) = await RDCleanPathConnection.ConnectRDCleanPath(
+                        config, gatewayUrl, gatewayToken!, destination, null, factory, _sessionCts.Token);
+                    res = gatewayRes;
+                    this._framed = new Framed<Stream>(gatewayFramed.GetInner().Item1);
+
+                    Trace.TraceInformation("=== GATEWAY CONNECTION SUCCESSFUL ===");
+                }
+                else
+                {
+                    Trace.TraceInformation("=== DIRECT MODE ===");
+
+                    // Direct connection (original behavior)
+                    var (directRes, directFramed) = await Connection.Connect(config, server, factory, port, _sessionCts.Token);
+                    res = directRes;
+                    this._framed = new Framed<Stream>(directFramed.GetInner().Item1);
+
+                    Trace.TraceInformation("=== DIRECT CONNECTION SUCCESSFUL ===");
+                }
+
+                this._decodedImage = DecodedImage.New(PixelFormat.RgbA32, res.DesktopSize.Width,
+                    res.DesktopSize.Height);
+                this._pointerSoftwareRendering = res.PointerSoftwareRendering;
+                this._activeStage = ActiveStage.New(res);
+                ReadPduAndProcessActiveStage();
+
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    HandleClipboardEvents();
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceError($"Connection failed: {ex.Message}");
+                Trace.TraceError($"Stack trace: {ex.StackTrace}");
+                throw;
+            }
+        });
+    }
+
+    private void BeforeConnectSetup()
+    {
+        _imageControl = this.FindControl<Image>("RdpImage");
+        if (_imageControl == null)
+        {
+            Trace.TraceError("Error finding Image control");
+            throw new NullReferenceException("image control not found");
+        }
+
+        var bitmap = new WriteableBitmap(new PixelSize(_renderModel.Width, _renderModel.Height),
+            new Vector(96, 96),
+            Avalonia.Platform.PixelFormat.Rgba8888, AlphaFormat.Opaque
+        );
+        _imageControl.Source = bitmap;
+        _imageControl.SizeChanged += (sender, e) => { Resize(e.NewSize.Width, e.NewSize.Height); };
+    }
+
+    private void Render(InclusiveRectangle damage)
+    {
+        Dispatcher.UIThread.Invoke(() =>
+        {
+            try
+            {
+                if (_imageControl is not { Source: WriteableBitmap writableBitmap })
+                {
+                    return;
+                }
+
+                PixelSize size;
+                int stride, left, top, right, bottom;
+                bool resized;
+                byte[] frameBuffer;
+                lock (_stageLock)
+                {
+                    var image = _decodedImage!;
+                    size = new PixelSize(image.Width, image.Height);
+                    stride = size.Width * BytesPerPixel;
+                    resized = writableBitmap.PixelSize != size || _frameBuffer is null;
+                    if (resized)
+                    {
+                        _frameBuffer = new byte[stride * size.Height];
+                        image.FillData(_frameBuffer);
+                        (left, top, right, bottom) = (0, 0, size.Width - 1, size.Height - 1);
+                    }
+                    else
+                    {
+                        image.CopyRectInto(damage, _frameBuffer!, (nuint)stride);
+                        (left, top, right, bottom) = (damage.Left, damage.Top, damage.Right, damage.Bottom);
+                    }
+
+                    frameBuffer = _frameBuffer!;
+                }
+
+                if (resized)
+                {
+                    writableBitmap = new WriteableBitmap(size, new Vector(96, 96),
+                        Avalonia.Platform.PixelFormat.Rgba8888, AlphaFormat.Opaque);
+                    _imageControl.Source = writableBitmap;
+                }
+
+                using (var bitmap = writableBitmap.Lock())
+                {
+                    unsafe
+                    {
+                        int rowLength = (right - left + 1) * BytesPerPixel;
+                        for (int y = top; y <= bottom; y++)
+                        {
+                            var source = new ReadOnlySpan<byte>(frameBuffer, y * stride + left * BytesPerPixel, rowLength);
+                            var destination = new Span<byte>(
+                                (byte*)bitmap.Address + y * bitmap.RowBytes + left * BytesPerPixel, rowLength);
+                            source.CopyTo(destination);
+                        }
+                    }
+                }
+
+                if (_deferPresent)
+                {
+                    _presentPending = true;
+                }
+                else
+                {
+                    _imageControl.InvalidateVisual();
+                }
+            }
+            catch (Exception e)
+            {
+                Trace.TraceError("Error rendering: " + e.Message);
+            }
+        });
+    }
+
+    private void Present()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_presentPending)
+            {
+                _presentPending = false;
+                _imageControl?.InvalidateVisual();
+            }
+        });
+    }
+
+
+    private void ReadPduAndProcessActiveStage()
+    {
+        Task.Run(async () =>
+        {
+            var token = _sessionCts!.Token;
+            try
+            {
+                var keepLooping = true;
+                Task<(Action Action, byte[] Payload)>? readPduTask = null;
+                (Action Action, byte[] Payload)? buffered = null;
+                while (keepLooping)
+                {
+                    (Action Action, byte[] Payload) pdu;
+                    if (buffered is { } next)
+                    {
+                        pdu = next;
+                    }
+                    else
+                    {
+                        // Start the next read only once the previous frame's outputs are handled:
+                        // reactivation reads from the same stream.
+                        readPduTask ??= _framed!.ReadPdu(token);
+
+                        // Wake up periodically to send RDPDR completions (e.g. smartcard calls) that
+                        // finished while the server sent nothing.
+                        if (readPduTask != await Task.WhenAny(readPduTask, Task.Delay(RdpdrDeferredPollInterval)))
+                        {
+                            var deferred = WithStageLock(() => _activeStage!.PollRdpdrDeferred());
+                            keepLooping = await HandleActiveStageOutput(deferred);
+                            continue;
+                        }
+
+                        pdu = await readPduTask;
+                        readPduTask = null;
+                    }
+
+                    var outputIterator = WithStageLock(() => _activeStage!.Process(_decodedImage!, pdu.Action, pdu.Payload));
+
+                    // Present only once no further PDU is already buffered, so a burst of updates draws once.
+                    buffered = _framed!.TryReadBufferedPdu(out var nextPdu) ? nextPdu : null;
+                    _deferPresent = buffered is not null;
+                    keepLooping = await HandleActiveStageOutput(outputIterator);
+                    if (buffered is null)
+                    {
+                        Present();
+                    }
+                }
+
+                Trace.TraceInformation("ReadPduAndProcessActiveStage loop ended");
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                Trace.TraceInformation("ReadPduAndProcessActiveStage loop cancelled");
+            }
+            catch (Exception e)
+            {
+                Trace.TraceError("Error reading PDU: " + e.Message);
+            }
+            finally
+            {
+                // The session ended: stop a read still pending instead of leaving it to fail on stream close.
+                _sessionCts.Cancel();
+            }
+        });
+    }
+
+    private void HandleClipboardEvents()
+    {
+        Task.Run(async () =>
+        {
+            var sinceTimeouts = Stopwatch.StartNew();
+
+            while (_cliprdr != null)
+            {
+                // Wakes up at least every second, to expire clipboard locks and file transfers.
+                var message = _cliprdr.NextClipboardMessageTimeout(1000);
+
+                if (message != null)
+                {
+                    Trace.TraceInformation("Clipboard message type: " + message.MessageType);
+                    await SubmitClipboardFrame(() => _activeStage!.SubmitClipboardMessage(message));
+                }
+
+                if (sinceTimeouts.Elapsed >= ClipboardTimeoutsInterval)
+                {
+                    sinceTimeouts.Restart();
+                    await SubmitClipboardFrame(() => _activeStage!.DriveClipboardTimeouts());
+                }
+            }
+        });
+    }
+
+    private async Task SubmitClipboardFrame(Func<VecU8> submit)
+    {
+        VecU8 frame;
+        try
+        {
+            frame = WithStageLock(submit);
+        }
+        catch (IronRdpException e)
+        {
+            // Only this clipboard operation failed: the session goes on.
+            Trace.TraceError("Clipboard error: " + e.Message);
+            return;
+        }
+
+        var size = (int)frame.Size;
+        if (size == 0)
+        {
+            return;
+        }
+
+        var toWriteBack = new byte[size];
+        frame.Fill(toWriteBack);
+
+        await _framed!.Write(toWriteBack);
+    }
+
+    private static Config BuildConfig(string username, string password, string? domain, int width, int height)
+    {
+        ConfigBuilder configBuilder = ConfigBuilder.New();
+
+        configBuilder.WithUsernameAndPassword(username, password);
+        if (domain != null)
+        {
+            configBuilder.Domain = domain;
+        }
+
+        configBuilder.SetDesktopSize((ushort)height, (ushort)width);
+        configBuilder.ClientName = "IronRdp";
+        configBuilder.ClientDir = "C:\\";
+        configBuilder.PerformanceFlags = PerformanceFlags.NewDefault();
+
+        return configBuilder.Build();
+    }
+
+    private void OnPointerPressed(object sender, PointerPressedEventArgs e)
+    {
+        PointerUpdateKind mouseButton = e.GetCurrentPoint((Visual?)sender).Properties.PointerUpdateKind;
+
+        MouseButtonType buttonType = mouseButton switch
+        {
+            PointerUpdateKind.LeftButtonPressed => MouseButtonType.Left,
+            PointerUpdateKind.RightButtonPressed => MouseButtonType.Right,
+            PointerUpdateKind.MiddleButtonPressed => MouseButtonType.Middle,
+            PointerUpdateKind.XButton1Pressed => MouseButtonType.X1,
+            PointerUpdateKind.XButton2Pressed => MouseButtonType.X2,
+            PointerUpdateKind.LeftButtonReleased => MouseButtonType.Left,
+            PointerUpdateKind.MiddleButtonReleased => MouseButtonType.Middle,
+            PointerUpdateKind.RightButtonReleased => MouseButtonType.Right,
+            PointerUpdateKind.XButton1Released => MouseButtonType.X1,
+            PointerUpdateKind.XButton2Released => MouseButtonType.X2,
+            PointerUpdateKind.Other => throw new NotImplementedException(),
+            _ => throw new NotImplementedException(),
+        };
+
+        var buttonOperation = MouseButton.New(buttonType).AsOperationMouseButtonPressed();
+        var fastpath = _inputDatabase!.Apply(buttonOperation);
+        SendFastpath(fastpath);
+    }
+
+    private void OnPointerMoved(object sender, PointerEventArgs e)
+    {
+        if (this._activeStage == null || this._decodedImage == null)
+        {
+            return;
+        }
+
+        var position = e.GetPosition((Visual?)sender);
+        var x = (ushort)position.X;
+        var y = (ushort)position.Y;
+        var mouseMovedEvent = MousePosition.New(x, y).AsMoveOperation();
+        var fastpath = _inputDatabase!.Apply(mouseMovedEvent);
+        SendFastpath(fastpath);
+    }
+
+    private void OnPointerReleased(object sender, PointerReleasedEventArgs e)
+    {
+        PointerUpdateKind mouseButton = e.GetCurrentPoint((Visual?)sender).Properties.PointerUpdateKind;
+
+        MouseButtonType buttonType = mouseButton switch
+        {
+            PointerUpdateKind.LeftButtonPressed => MouseButtonType.Left,
+            PointerUpdateKind.RightButtonPressed => MouseButtonType.Right,
+            PointerUpdateKind.MiddleButtonPressed => MouseButtonType.Middle,
+            PointerUpdateKind.XButton1Pressed => MouseButtonType.X1,
+            PointerUpdateKind.XButton2Pressed => MouseButtonType.X2,
+            PointerUpdateKind.LeftButtonReleased => MouseButtonType.Left,
+            PointerUpdateKind.MiddleButtonReleased => MouseButtonType.Middle,
+            PointerUpdateKind.RightButtonReleased => MouseButtonType.Right,
+            PointerUpdateKind.XButton1Released => MouseButtonType.X1,
+            PointerUpdateKind.XButton2Released => MouseButtonType.X2,
+            PointerUpdateKind.Other => throw new NotImplementedException(),
+            _ => throw new NotImplementedException(),
+        };
+
+        var buttonOperation = MouseButton.New(buttonType).AsOperationMouseButtonReleased();
+        var fastpath = _inputDatabase!.Apply(buttonOperation);
+        SendFastpath(fastpath);
+    }
+
+    private void OnKeyDown(object? sender, KeyEventArgs? e)
+    {
+        if (_activeStage == null || _decodedImage == null)
+        {
+            return;
+        }
+
+        PhysicalKey physicalKey = e!.PhysicalKey;
+
+        var keycode = KeyCodeMapper.GetScancode(physicalKey);
+
+        if (keycode == null)
+        {
+            return;
+        }
+
+        var keyOperation = Scancode.FromU16(keycode.Value).AsOperationKeyPressed();
+        var fastpath = _inputDatabase!.Apply(keyOperation);
+        SendFastpath(fastpath);
+    }
+
+    private void OnKeyUp(object? sender, KeyEventArgs? e)
+    {
+        if (_activeStage == null || _decodedImage == null)
+        {
+            return;
+        }
+
+        PhysicalKey physicalKey = e!.PhysicalKey;
+
+        var keycode = KeyCodeMapper.GetScancode(physicalKey);
+
+        if (keycode == null)
+        {
+            return;
+        }
+
+        var keyOperation = Scancode.FromU16(keycode.Value).AsOperationKeyReleased();
+        var fastpath = _inputDatabase!.Apply(keyOperation);
+        SendFastpath(fastpath);
+    }
+
+    private void SendFastpath(FastPathInputEventIterator fastpath)
+    {
+        if (_activeStage == null || _decodedImage == null)
+        {
+            return;
+        }
+
+        if (_pointerSoftwareRendering)
+        {
+            var output = WithStageLock(() => _activeStage!.ProcessFastpathInput(_decodedImage!, fastpath));
+            _ = HandleActiveStageOutput(output);
+            return;
+        }
+
+        // Encoding reads neither the stage nor the image, so the PDU loop never delays input.
+        using var frame = fastpath.Encode();
+        byte[] frameBytes = new byte[frame.Size];
+        frame.Fill(frameBytes);
+        _ = WriteInput(frameBytes);
+    }
+
+    private async Task WriteInput(byte[] frameBytes)
+    {
+        try
+        {
+            await _framed!.Write(frameBytes);
+        }
+        catch (Exception e)
+        {
+            Trace.TraceError("Error sending input: " + e.Message);
+        }
+    }
+
+    private T WithStageLock<T>(Func<T> call)
+    {
+        lock (_stageLock)
+        {
+            return call();
+        }
+    }
+
+    private async Task<bool> HandleActiveStageOutput(ActiveStageOutputIterator outputIterator)
+    {
+        while (!outputIterator.IsEmpty())
+        {
+            try
+            {
+                using var output =
+                    outputIterator
+                        .Next()!; // outputIterator.Next() is not null since outputIterator.IsEmpty() is false
+                if (output.EnumType == ActiveStageOutputType.Terminate)
+                {
+                    return false;
+                }
+
+                if (output.EnumType == ActiveStageOutputType.ResponseFrame)
+                {
+                    // Send the response frame to the server
+                    using var responseFrame = output.ResponseFrame;
+                    byte[] responseFrameBytes = new byte[responseFrame.Size];
+                    responseFrame.Fill(responseFrameBytes);
+                    await _framed!.Write(responseFrameBytes);
+                }
+                else if (output.EnumType == ActiveStageOutputType.GraphicsUpdate)
+                {
+                    Render(output.GraphicsUpdate);
+                }
+                else if (output.EnumType == ActiveStageOutputType.DeactivateAll)
+                {
+                    var activationSequence = WithStageLock(() => _activeStage!.CreateConnectionActivation());
+                    var writeBuf = WriteBuf.New();
+                    while (true)
+                    {
+                        await Connection.SingleSequenceStep(activationSequence, writeBuf, _framed!, _sessionCts!.Token);
+
+                        if (activationSequence.State.Type != ConnectionActivationStateType.Finalized)
+                            continue;
+
+                        var finalized = activationSequence.State.Finalized;
+                        var desktopSize = finalized.DesktopSize;
+                        var ioChannelId = activationSequence.IoChannelId;
+                        var userChannelId = activationSequence.UserChannelId;
+                        var shareId = finalized.ShareId;
+                        var enableServerPointer = finalized.EnableServerPointer;
+                        var pointerSoftwareRendering = finalized.PointerSoftwareRendering;
+                        var staticChannelChunkSize = finalized.StaticChannelChunkSize;
+                        var windowSupportLevel = finalized.WindowSupportLevel;
+
+                        lock (_stageLock)
+                        {
+                            var previousImage = _decodedImage;
+                            _decodedImage = DecodedImage.New(PixelFormat.RgbA32, desktopSize.Width,
+                                desktopSize.Height);
+                            previousImage?.Dispose();
+                            // The new image starts blank, so the next render must copy all of it.
+                            _frameBuffer = null;
+
+                            _activeStage!.Reactivate(
+                                ioChannelId,
+                                userChannelId,
+                                shareId,
+                                enableServerPointer,
+                                pointerSoftwareRendering,
+                                staticChannelChunkSize,
+                                windowSupportLevel
+                            );
+
+                            _activeStage.EnableServerPointer = enableServerPointer;
+                            _pointerSoftwareRendering = pointerSoftwareRendering;
+                        }
+
+                        break;
+                    }
+                }
+                else
+                {
+                    Trace.TraceError("Unhandled ActiveStageOutputType: " + output.EnumType);
+                }
+            }
+            catch (Exception e)
+            {
+                Trace.TraceError("Error processing active stage output: " + e.Message);
+            }
+        }
+
+        return true;
+    }
+
+    IntPtr? GetWindowHandle()
+    {
+        var handle = TryGetPlatformHandle();
+        if (handle == null)
+        {
+            return null;
+        }
+
+        return handle.Handle;
+    }
+
+    public void OnDisconnectClick(object? sender, RoutedEventArgs e)
+    {
+        var output = WithStageLock(() => this._activeStage!.GracefulShutdown());
+
+        HandleActiveStageOutput(output).ContinueWith(t =>
+        {
+            if (t.IsFaulted)
+            {
+                Trace.TraceError("Error processing active stage: " + t.Exception!.Message);
+            }
+        });
+    }
+}
+
+public sealed class RendererModel : INotifyPropertyChanged
+{
+    private int _width;
+    private int _height;
+
+    public int Width
+    {
+        get => _width;
+        set
+        {
+            if (_width != value)
+            {
+                _width = value;
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public int Height
+    {
+        get { return _height; }
+        set
+        {
+            if (_height != value)
+            {
+                _height = value;
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+}

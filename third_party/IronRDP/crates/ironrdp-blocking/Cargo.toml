@@ -1,0 +1,30 @@
+[package]
+name = "ironrdp-blocking"
+version = "0.12.0"
+readme = "README.md"
+description = "Blocking I/O abstraction wrapping the IronRDP state machines conveniently"
+edition.workspace = true
+rust-version = "1.94"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[dependencies]
+ironrdp-connector = { path = "../ironrdp-connector", version = "0.12" } # public
+ironrdp-core = { path = "../ironrdp-core", version = "0.3", features = ["alloc"] } # public
+ironrdp-pdu = { path = "../ironrdp-pdu", version = "0.11" } # public
+tracing = { version = "0.1", features = ["log"] }
+bytes = "1" # public
+
+[features]
+remote-guard = ["ironrdp-connector/remote-guard"]
+
+[lints]
+workspace = true

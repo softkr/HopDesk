@@ -1,0 +1,96 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+
+## [[0.7.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-dvc-pipe-proxy-v0.6.0...ironrdp-dvc-pipe-proxy-v0.7.0)] - 2026-10-27
+
+### <!-- 7 -->Build
+
+- Declare `ironrdp-dvc` as a public dependency, since `DvcNamedPipeProxy` implements its `DvcProcessor` trait ([#2213](https://github.com/Devolutions/IronRDP/issues/2213)) ([405e6576ba](https://github.com/Devolutions/IronRDP/commit/405e6576bac7c64b04efc8a0d00beeecdc648356))
+
+- [**breaking**] Update `ironrdp-dvc` public dependency to 0.10
+
+- [**breaking**] Update `ironrdp-pdu` public dependency to 0.11
+
+- [**breaking**] Update `ironrdp-svc` public dependency to 0.10
+
+
+
+## [[0.6.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-dvc-pipe-proxy-v0.5.0...ironrdp-dvc-pipe-proxy-v0.6.0)] - 2026-10-23
+
+### <!-- 4 -->Bug Fixes
+
+- Pass the proxy's own channel ID, instead of 0, to the write callback given to `DvcNamedPipeProxy::new` ([#2209](https://github.com/Devolutions/IronRDP/issues/2209)) ([10199db3b0](https://github.com/Devolutions/IronRDP/commit/10199db3b0aeca629adc02234ffdbb570bb77d43))
+
+- Accept a Windows pipe client that connects before the proxy starts waiting for it ([#1447](https://github.com/Devolutions/IronRDP/issues/1447)) ([079b48422b](https://github.com/Devolutions/IronRDP/commit/079b48422b0b78d37beb76994950a2a07c442a94))
+
+- Retry with backoff after a pipe connection error instead of stopping the proxy ([#1447](https://github.com/Devolutions/IronRDP/issues/1447)) ([079b48422b](https://github.com/Devolutions/IronRDP/commit/079b48422b0b78d37beb76994950a2a07c442a94))
+
+- Return an error from `DvcProcessor::start` when the proxy worker thread cannot start ([#1447](https://github.com/Devolutions/IronRDP/issues/1447)) ([079b48422b](https://github.com/Devolutions/IronRDP/commit/079b48422b0b78d37beb76994950a2a07c442a94))
+
+### <!-- 7 -->Build
+
+- Raise the minimum supported Rust version to 1.94 ([#1495](https://github.com/Devolutions/IronRDP/issues/1495)) ([0aeea76e95](https://github.com/Devolutions/IronRDP/commit/0aeea76e95e6b6b590d65be353dd00596d50a895))
+
+- [**breaking**] Update `ironrdp-dvc` public dependency to 0.9
+
+- [**breaking**] Update `ironrdp-pdu` public dependency to 0.10
+
+- [**breaking**] Update `ironrdp-svc` public dependency to 0.9
+
+
+
+## [[0.5.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-dvc-pipe-proxy-v0.4.1...ironrdp-dvc-pipe-proxy-v0.5.0)] - 2026-07-10
+
+### <!-- 4 -->Bug Fixes
+
+- Lower verbosity of routine logs in library crates ([c36032f91b](https://github.com/Devolutions/IronRDP/commit/c36032f91b27390a2cd34bfb300cfbe099d847a9)) 
+
+  Library crates should not emit info! for routine, repeating operations;
+  that floods the default logs of the final consumer, which owns the
+  verbosity decision. Reserve info! for rare connection/session lifecycle
+  milestones, debug! for significant one-off events, and trace! for the
+  fine-grained detail only needed when nothing else explains a problem.
+
+- Remove trailing punctuation from log messages ([#1380](https://github.com/Devolutions/IronRDP/issues/1380)) ([f38554277a](https://github.com/Devolutions/IronRDP/commit/f38554277a1af3085c1fa5739cda515939d09abf)) 
+
+### <!-- 7 -->Build
+
+- [**breaking**] Update `ironrdp-pdu` public dependency to 0.9
+
+- [**breaking**] Update `ironrdp-svc` public dependency to 0.8
+
+
+
+## [[0.4.1](https://github.com/Devolutions/IronRDP/compare/ironrdp-dvc-pipe-proxy-v0.4.0...ironrdp-dvc-pipe-proxy-v0.4.1)] - 2026-06-05
+
+
+
+## [[0.4.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-dvc-pipe-proxy-v0.3.0...ironrdp-dvc-pipe-proxy-v0.4.0)] - 2026-05-27
+
+### <!-- 7 -->Build
+
+- [**breaking**] Update `ironrdp-pdu` and `ironrdp-svc` public dependencies
+
+## [[0.2.1](https://github.com/Devolutions/IronRDP/compare/ironrdp-dvc-pipe-proxy-v0.2.0...ironrdp-dvc-pipe-proxy-v0.2.1)] - 2025-09-24
+
+### <!-- 4 -->Bug Fixes
+
+- Change dvc proxy pipe mode from Message to Byte on Windows (#986) ([5f52a44b84](https://github.com/Devolutions/IronRDP/commit/5f52a44b840dd71eae6a355be00f1c4c671b3b58)) 
+
+- Add blocking logic for sending dvc pipe messages ([3182a018e2](https://github.com/Devolutions/IronRDP/commit/3182a018e2972eb77c52ea248387c96a9eb6a6a6)) 
+
+## [[0.2.0](https://github.com/Devolutions/IronRDP/compare/ironrdp-dvc-pipe-proxy-v0.1.0...ironrdp-dvc-pipe-proxy-v0.2.0)] - 2025-08-29
+
+### <!-- 1 -->Features
+
+- Make dvc named pipe proxy cross-platform (#896) ([166b76010c](https://github.com/Devolutions/IronRDP/commit/166b76010cbd8f8674e6e8d4801fee5cda1ad9e5)) 
+
+  - Make dvc named pipe proxy cross-platform (Unix implementation via
+  `tokio::net::unix::UnixStream`)
+  - Removed unsafe code for Windows implementation, switched to
+  `tokio::net::windows::named_pipe`

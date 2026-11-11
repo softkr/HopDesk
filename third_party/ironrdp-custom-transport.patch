@@ -1,0 +1,179 @@
+--- a/crates/ironrdp-client/src/config.rs
++++ b/crates/ironrdp-client/src/config.rs
+@@ -684,6 +684,12 @@
+         /// Full pipe path (`\\.\pipe\…`) or bare pipe name.
+         path: String,
+     },
++
++    /// [PATCH HopDesk] Embedder-supplied byte stream (e.g. an SSH `direct-tcpip` channel).
++    ///
++    /// TLS, CredSSP and the RDP connection sequence run on top of the stream exactly as for
++    /// [`Transport::Direct`], using [`Config::destination`] as the server name.
++    Custom(CustomTransport),
+ }
+ 
+ /// Transport selection used to configure a [`ConfigBuilder`].
+@@ -747,8 +753,52 @@
+         /// Full pipe path (`\\.\pipe\…`) or bare pipe name.
+         path: String,
+     },
++
++    /// [PATCH HopDesk] Embedder-supplied byte stream (e.g. an SSH `direct-tcpip` channel).
++    Custom(CustomTransport),
+ }
+ 
++// ── [PATCH HopDesk] Custom transport ──────────────────────────────────────
++
++/// Byte stream usable as an RDP transport.
++pub trait RdpStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync {}
++impl<T> RdpStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync {}
++
++/// Boxed [`RdpStream`].
++pub type BoxedRdpStream = Box<dyn RdpStream>;
++
++/// Future returned by a [`CustomTransport`] factory: the stream and the client address to report.
++pub type CustomConnectFuture = core::pin::Pin<
++    Box<dyn Future<Output = std::io::Result<(BoxedRdpStream, core::net::SocketAddr)>> + Send>,
++>;
++
++/// Factory opening a fresh transport stream; called once per connection attempt (reconnects included).
++///
++/// TLS, CredSSP and the RDP connection sequence run on top of the stream exactly as for a direct
++/// connection, with [`Config::destination`] used as the server name (TLS validation, CredSSP SPN).
++#[derive(Clone)]
++pub struct CustomTransport {
++    connect: Arc<dyn Fn() -> CustomConnectFuture + Send + Sync>,
++}
++
++impl CustomTransport {
++    pub fn new(connect: impl Fn() -> CustomConnectFuture + Send + Sync + 'static) -> Self {
++        Self {
++            connect: Arc::new(connect),
++        }
++    }
++
++    pub(crate) fn connect(&self) -> CustomConnectFuture {
++        (self.connect)()
++    }
++}
++
++impl fmt::Debug for CustomTransport {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("CustomTransport").finish_non_exhaustive()
++    }
++}
++
+ /// Endpoint and credentials for a fully-resolved RDS gateway connection.
+ #[cfg(feature = "gateway")]
+ #[derive(Clone, Debug)]
+@@ -1624,6 +1674,13 @@
+                 self.properties.clear_rdcleanpath();
+                 self.properties.clear_gateway();
+                 self.properties.set_named_pipe(path.clone());
++            }
++            // [PATCH HopDesk]
++            TransportKind::Custom(_) => {
++                self.properties.clear_rdcleanpath();
++                self.properties.clear_gateway();
++                #[cfg(windows)]
++                self.properties.clear_named_pipe();
+             }
+         }
+         self.transport = transport;
+@@ -2591,6 +2648,8 @@
+             }),
+             #[cfg(windows)]
+             TransportKind::NamedPipe { path } => Transport::NamedPipe { path },
++            // [PATCH HopDesk]
++            TransportKind::Custom(custom) => Transport::Custom(custom),
+         };
+ 
+         #[cfg(feature = "vmconnect")]
+--- a/crates/ironrdp-client/src/rdp.rs
++++ b/crates/ironrdp-client/src/rdp.rs
+@@ -1556,6 +1556,44 @@
+                     connect_named_pipe(
+                         &self.config,
+                         path,
++                        &self.input_event_sender,
++                        &self.output_event_sender,
++                        cliprdr_factory,
++                        rdpdr_factory,
++                        reconnect_cookie,
++                    ),
++                    &mut self.close_receiver,
++                ))
++                .await
++                {
++                    Some(Ok(result)) => result,
++                    Some(Err(error)) => {
++                        if self
++                            .try_auto_reconnect(
++                                auto_reconnect_policy,
++                                &mut reconnect_attempt,
++                                auto_reconnect_cookie.as_ref(),
++                            )
++                            .await
++                        {
++                            continue;
++                        }
++                        if !self.send_output_event(RdpOutputEvent::ConnectionFailure(error)).await {
++                            self.emit_user_initiated_termination();
++                        }
++                        break;
++                    }
++                    None => {
++                        self.emit_user_initiated_termination();
++                        break;
++                    }
++                },
++
++                // [PATCH HopDesk] Embedder-supplied stream (e.g. SSH jump host tunnel).
++                Transport::Custom(custom) => match Box::pin(cancelable_operation(
++                    connect_custom(
++                        &self.config,
++                        custom,
+                         &self.input_event_sender,
+                         &self.output_event_sender,
+                         cliprdr_factory,
+@@ -3287,6 +3325,40 @@
+     Box::pin(security_upgrade_and_finalize(framed, connector, config, None)).await
+ }
+ 
++/// [PATCH HopDesk] Embedder-supplied byte stream → TLS/CredSSP connection.
++///
++/// The stream is opened by the embedder (e.g. an SSH `direct-tcpip` channel). TLS validation and
++/// CredSSP use `config.destination` as the server name, exactly as for a direct connection.
++async fn connect_custom(
++    config: &Config,
++    custom: &crate::config::CustomTransport,
++    input_sender: &RdpInputSender,
++    output_event_sender: &crate::output_channel::OutputEventSender,
++    cliprdr_factory: CliprdrFactoryRef<'_>,
++    rdpdr_factory: RdpdrFactoryRef<'_>,
++    auto_reconnect_cookie: Option<&ServerAutoReconnect>,
++) -> ConnectorResult<ConnectOutput> {
++    let (stream, client_addr) = custom
++        .connect()
++        .await
++        .map_err(|e| ironrdp_connector::custom_err!("custom transport connect", e))?;
++
++    let framed = ironrdp_tokio::TokioFramed::new(stream);
++    let connector = build_connector(
++        config,
++        client_addr,
++        (input_sender, output_event_sender),
++        cliprdr_factory,
++        rdpdr_factory,
++        RdpdrDevicePolicy::ALLOW_ALL,
++        true,
++        false,
++        auto_reconnect_cookie,
++    )?;
++
++    Box::pin(security_upgrade_and_finalize(framed, connector, config, None)).await
++}
++
+ /// RDS gateway TCP → gateway auth → TLS connection.
+ #[cfg(feature = "gateway")]
+ async fn connect_gateway(
