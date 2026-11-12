@@ -37,7 +37,7 @@ const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-256.png");
 const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-full-256.png");
 
 /// How often a running launcher looks for a newer release (it may stay in the menu bar for days).
-const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 pub fn run() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
