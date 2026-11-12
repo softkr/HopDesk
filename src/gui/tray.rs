@@ -1,9 +1,9 @@
 //! Launcher icon in the macOS menu bar / Windows notification area.
 //!
 //! Closing the launcher window only hides it, so HopDesk keeps running after an accidental close.
-//! The icon's menu opens the window again or quits.
+//! The icon's menu opens the window again, checks for an update, or quits.
 
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context as _;
@@ -24,10 +24,12 @@ pub struct Tray {
 
 impl Tray {
     /// Must run on the main thread once the event loop is running (eframe's app creator).
-    pub fn new(ctx: &egui::Context) -> anyhow::Result<Self> {
+    /// "업데이트 확인" shows the window and sends a request on `check_update`.
+    pub fn new(ctx: &egui::Context, check_update: mpsc::Sender<()>) -> anyhow::Result<Self> {
         let open = MenuItem::new("HopDesk 열기", true, None);
+        let check = MenuItem::new("업데이트 확인", true, None);
         let quit = MenuItem::new("종료", true, None);
-        let menu = Menu::with_items(&[&open, &PredefinedMenuItem::separator(), &quit]).context("tray menu")?;
+        let menu = Menu::with_items(&[&open, &check, &PredefinedMenuItem::separator(), &quit]).context("tray menu")?;
         let builder = TrayIconBuilder::new().with_tooltip("HopDesk").with_menu(Box::new(menu));
         #[cfg(target_os = "macos")]
         let builder = builder.with_icon_templated(icon()?);
@@ -36,12 +38,16 @@ impl Tray {
         let icon = builder.build().context("tray icon")?;
 
         let quitting = Arc::new(AtomicBool::new(false));
-        let (open_id, quit_id) = (open.id().clone(), quit.id().clone());
+        let (open_id, check_id, quit_id) = (open.id().clone(), check.id().clone(), quit.id().clone());
         let ctx = ctx.clone();
         let quit_flag = Arc::clone(&quitting);
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             if event.id == open_id {
                 show(&ctx);
+            } else if event.id == check_id {
+                // The result appears in the window, so bring it up.
+                show(&ctx);
+                let _ = check_update.send(());
             } else if event.id == quit_id {
                 quit_flag.store(true, Ordering::Relaxed);
                 ctx.send_viewport_cmd(ViewportCommand::Close);

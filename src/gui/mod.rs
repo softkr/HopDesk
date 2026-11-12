@@ -15,7 +15,8 @@ mod widgets;
 #[cfg(test)]
 mod screenshots;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::time::Duration;
 
 use eframe::egui::{
     self, Align2, CornerRadius, FontId, Id, Key, Margin, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
@@ -35,6 +36,9 @@ const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-256.png");
 #[cfg(not(target_os = "macos"))]
 const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-full-256.png");
 
+/// How often a running launcher looks for a newer release (it may stay in the menu bar for days).
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
 pub fn run() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -53,13 +57,14 @@ pub fn run() -> anyhow::Result<()> {
             theme::apply(&cc.egui_ctx);
             #[cfg_attr(not(any(target_os = "macos", windows)), expect(unused_mut, reason = "no tray"))]
             let mut launcher = Launcher::new();
+            #[cfg_attr(not(any(target_os = "macos", windows)), expect(unused_variables, reason = "no tray"))]
+            let check_now = launcher.start_update_checks(&cc.egui_ctx);
             #[cfg(any(target_os = "macos", windows))]
-            match tray::Tray::new(&cc.egui_ctx) {
+            match tray::Tray::new(&cc.egui_ctx, check_now) {
                 Ok(tray) => launcher.tray = Some(tray),
                 // Without the icon, closing the window quits as before.
                 Err(error) => tracing::warn!(error = %format!("{error:#}"), "Tray icon unavailable"),
             }
-            launcher.check_for_update(&cc.egui_ctx);
             Ok(Box::new(launcher))
         }),
     )
@@ -118,6 +123,8 @@ pub struct Launcher {
     toasts: Vec<Toast>,
     sessions: Sessions,
     update: Arc<Mutex<UpdateState>>,
+    /// Results of update checks the user asked for, shown as toasts.
+    update_notices: Arc<Mutex<Vec<(ToastKind, String)>>>,
     /// Menu bar / notification area icon; while present, closing the window hides it.
     #[cfg(any(target_os = "macos", windows))]
     tray: Option<tray::Tray>,
@@ -150,6 +157,7 @@ impl Launcher {
             toasts: Vec::new(),
             sessions,
             update: Arc::new(Mutex::new(UpdateState::None)),
+            update_notices: Arc::default(),
             #[cfg(any(target_os = "macos", windows))]
             tray: None,
         }
@@ -163,22 +171,32 @@ impl Launcher {
         *self.update.lock().unwrap_or_else(PoisonError::into_inner) = state;
     }
 
-    /// Looks for a newer release in the background; development builds never check.
-    fn check_for_update(&self, ctx: &egui::Context) {
+    /// Looks for a newer release in the background now, every [`UPDATE_CHECK_INTERVAL`] after that,
+    /// and whenever the returned sender asks; asked-for checks report their result as a toast.
+    /// Development builds never check.
+    fn start_update_checks(&self, ctx: &egui::Context) -> mpsc::Sender<()> {
         update::clean_up_previous();
-        if cfg!(debug_assertions) {
-            return;
-        }
-        let this = self.update.clone();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || match update::check() {
-            Ok(Some(release)) => {
-                *this.lock().unwrap_or_else(PoisonError::into_inner) = UpdateState::Available(release);
+        let (requests, requested) = mpsc::channel();
+        // The thread holds a sender itself, so waiting only ever ends by a request or the interval.
+        let keep_open = requests.clone();
+        let (state, notices, ctx) = (self.update.clone(), self.update_notices.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _keep_open = keep_open;
+            let mut asked = false;
+            loop {
+                let notice = if cfg!(debug_assertions) {
+                    asked.then(|| (ToastKind::Info, "개발 빌드는 업데이트를 확인하지 않습니다".to_owned()))
+                } else {
+                    check_update_once(&state, asked)
+                };
+                if let Some(notice) = notice {
+                    notices.lock().unwrap_or_else(PoisonError::into_inner).push(notice);
+                }
                 ctx.request_repaint();
+                asked = requested.recv_timeout(UPDATE_CHECK_INTERVAL).is_ok();
             }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(error = %format!("{error:#}"), "Update check failed"),
         });
+        requests
     }
 
     /// Installs `release` in the background; the app restarts into the new version on success.
@@ -391,6 +409,10 @@ impl Launcher {
 
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        let update_notices = std::mem::take(&mut *self.update_notices.lock().unwrap_or_else(PoisonError::into_inner));
+        for (kind, text) in update_notices {
+            self.toast(&ctx, kind, text);
+        }
         for notice in self.sessions.take_notices() {
             match notice {
                 Notice::Ended { name } => self.toast(&ctx, ToastKind::Info, format!("‘{name}’ 세션이 종료되었습니다")),
@@ -721,6 +743,36 @@ impl eframe::App for Launcher {
     }
 }
 
+/// Runs one update check and records a newer release; returns the toast for a check the user asked for.
+fn check_update_once(state: &Mutex<UpdateState>, asked: bool) -> Option<(ToastKind, String)> {
+    let notice = match update::check() {
+        Ok(Some(release)) => {
+            let notice = (ToastKind::Info, format!("새 버전이 있습니다: {}", release.version));
+            offer_release(&mut state.lock().unwrap_or_else(PoisonError::into_inner), release);
+            notice
+        }
+        Ok(None) => (ToastKind::Success, format!("최신 버전입니다 ({})", env!("CARGO_PKG_VERSION"))),
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "Update check failed");
+            (ToastKind::Error, format!("업데이트를 확인하지 못했습니다: {error:#}"))
+        }
+    };
+    asked.then_some(notice)
+}
+
+/// Shows `release` in the sidebar, unless an install is under way or that version is already shown
+/// (which keeps a failed install's error visible).
+fn offer_release(state: &mut UpdateState, release: Release) {
+    let shown = match state {
+        UpdateState::None => None,
+        UpdateState::Installing(_) => return,
+        UpdateState::Available(r) | UpdateState::Failed(r, _) => Some(r),
+    };
+    if shown.is_none_or(|r| r.version != release.version) {
+        *state = UpdateState::Available(release);
+    }
+}
+
 /// One profile in the sidebar: avatar, name, target, session status.
 fn list_row(ui: &mut Ui, pal: &Palette, p: &Profile, selected: bool, state: Option<&State>) -> egui::Response {
     let height = 56.0;
@@ -792,4 +844,48 @@ fn single_line(ui: &Ui, text: &str, font: FontId, color: egui::Color32, max_w: f
     let mut job = egui::text::LayoutJob::single_section(text.to_owned(), egui::TextFormat::simple(font, color));
     job.wrap = egui::text::TextWrapping::truncate_at_width(max_w);
     ui.painter().layout_job(job)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UpdateState, offer_release};
+    use crate::update::Release;
+
+    fn shown_version(state: &UpdateState) -> Option<&str> {
+        match state {
+            UpdateState::None => None,
+            UpdateState::Available(r) | UpdateState::Installing(r) | UpdateState::Failed(r, _) => Some(&r.version),
+        }
+    }
+
+    #[test]
+    fn a_found_release_is_offered() {
+        let mut state = UpdateState::None;
+        offer_release(&mut state, Release::for_test("0.2.0"));
+        assert!(matches!(state, UpdateState::Available(_)));
+        assert_eq!(shown_version(&state), Some("0.2.0"));
+    }
+
+    #[test]
+    fn a_later_release_replaces_the_offer() {
+        let mut state = UpdateState::Failed(Release::for_test("0.2.0"), "network".to_owned());
+        offer_release(&mut state, Release::for_test("0.3.0"));
+        assert!(matches!(state, UpdateState::Available(_)));
+        assert_eq!(shown_version(&state), Some("0.3.0"));
+    }
+
+    #[test]
+    fn the_same_release_keeps_a_failed_install_visible() {
+        let mut state = UpdateState::Failed(Release::for_test("0.2.0"), "network".to_owned());
+        offer_release(&mut state, Release::for_test("0.2.0"));
+        assert!(matches!(state, UpdateState::Failed(..)));
+    }
+
+    #[test]
+    fn an_install_in_progress_is_not_interrupted() {
+        let mut state = UpdateState::Installing(Release::for_test("0.2.0"));
+        offer_release(&mut state, Release::for_test("0.3.0"));
+        assert!(matches!(state, UpdateState::Installing(_)));
+        assert_eq!(shown_version(&state), Some("0.2.0"));
+    }
 }
