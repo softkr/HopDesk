@@ -141,6 +141,14 @@ impl Launcher {
             });
             ProfileStore::default()
         });
+        // Before any window opens: the Keychain may ask for access once per stored secret.
+        if let Err(e) = store.migrate_secrets() {
+            toasts.push(Toast {
+                text: format!("저장된 비밀번호를 옮기지 못했습니다: {e:#}"),
+                kind: ToastKind::Error,
+                until: f64::INFINITY,
+            });
+        }
         let mut launcher = Self::with_store(store, Sessions::default());
         launcher.toasts = toasts;
         launcher

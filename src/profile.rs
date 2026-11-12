@@ -2,7 +2,7 @@
 //!
 //! Non-secret settings live in `profiles.toml` under the per-user config directory.
 //! Passwords never touch that file: they are stored in the OS credential store
-//! (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+//! (macOS Keychain, Windows Credential Manager, Linux Secret Service); see [`crate::secret_store`].
 
 use std::fs;
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const KEYRING_SERVICE: &str = "HopDesk";
+use crate::secret_store;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -116,29 +116,19 @@ impl Secret {
 
 impl Profile {
     pub fn secret(&self, which: Secret) -> anyhow::Result<Option<String>> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &which.account(self.id))?;
-        match entry.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e).context("read secret from the OS credential store"),
-        }
+        secret_store::get(&which.account(self.id))
     }
 
     pub fn set_secret(&self, which: Secret, value: &str) -> anyhow::Result<()> {
-        keyring::Entry::new(KEYRING_SERVICE, &which.account(self.id))?
-            .set_password(value)
-            .context("write secret to the OS credential store")
+        secret_store::set(&which.account(self.id), value)
     }
 
     pub fn delete_secrets(&self) -> anyhow::Result<()> {
-        for which in [Secret::Jump, Secret::Rdp] {
-            let entry = keyring::Entry::new(KEYRING_SERVICE, &which.account(self.id))?;
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => {}
-                Err(e) => return Err(e).context("delete secret from the OS credential store"),
-            }
-        }
-        Ok(())
+        secret_store::delete(&self.secret_accounts())
+    }
+
+    fn secret_accounts(&self) -> Vec<String> {
+        [Secret::Jump, Secret::Rdp].map(|which| which.account(self.id)).into()
     }
 }
 
@@ -171,6 +161,12 @@ impl ProfileStore {
         let path = Self::path()?;
         let text = toml::to_string_pretty(self)?;
         crate::write_private_file(&path, text.as_bytes())
+    }
+
+    /// Moves the profiles' secrets stored by earlier versions to where this version keeps them.
+    pub fn migrate_secrets(&self) -> anyhow::Result<()> {
+        let accounts: Vec<String> = self.profiles.iter().flat_map(Profile::secret_accounts).collect();
+        secret_store::migrate(&accounts)
     }
 
     pub fn profiles(&self) -> &[Profile] {

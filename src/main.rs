@@ -23,6 +23,7 @@ mod file_offer;
 mod file_drop;
 mod gui;
 mod profile;
+mod secret_store;
 mod session;
 mod shared_folder;
 mod status;
