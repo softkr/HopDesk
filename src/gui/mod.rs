@@ -13,6 +13,8 @@ mod widgets;
 #[cfg(test)]
 mod screenshots;
 
+use std::sync::{Arc, Mutex, PoisonError};
+
 use eframe::egui::{
     self, Align2, CornerRadius, FontId, Id, Key, Margin, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
@@ -23,6 +25,7 @@ use self::sessions::{Notice, Sessions, State};
 use self::theme::{Bold as _, Palette, bold_family, palette};
 use crate::profile::{Profile, ProfileStore};
 use crate::trust::TrustStore;
+use crate::update::{self, Release};
 
 /// macOS draws icons on Apple's grid (with margin); elsewhere the tile fills the square.
 #[cfg(target_os = "macos")]
@@ -46,7 +49,9 @@ pub fn run() -> anyhow::Result<()> {
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
-            Ok(Box::new(Launcher::new()))
+            let launcher = Launcher::new();
+            launcher.check_for_update(&cc.egui_ctx);
+            Ok(Box::new(launcher))
         }),
     )
     .map_err(|e| anyhow::anyhow!("GUI failed: {e}"))
@@ -80,6 +85,15 @@ enum ToastKind {
     Error,
 }
 
+/// Progress of the update offered in the sidebar.
+#[derive(Clone)]
+enum UpdateState {
+    None,
+    Available(Release),
+    Installing(Release),
+    Failed(Release, String),
+}
+
 struct Toast {
     text: String,
     kind: ToastKind,
@@ -94,6 +108,7 @@ pub struct Launcher {
     dialog: Option<Dialog>,
     toasts: Vec<Toast>,
     sessions: Sessions,
+    update: Arc<Mutex<UpdateState>>,
 }
 
 impl Launcher {
@@ -122,7 +137,98 @@ impl Launcher {
             dialog: None,
             toasts: Vec::new(),
             sessions,
+            update: Arc::new(Mutex::new(UpdateState::None)),
         }
+    }
+
+    fn update_state(&self) -> UpdateState {
+        self.update.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn set_update_state(&self, state: UpdateState) {
+        *self.update.lock().unwrap_or_else(PoisonError::into_inner) = state;
+    }
+
+    /// Looks for a newer release in the background; development builds never check.
+    fn check_for_update(&self, ctx: &egui::Context) {
+        update::clean_up_previous();
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let this = self.update.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || match update::check() {
+            Ok(Some(release)) => {
+                *this.lock().unwrap_or_else(PoisonError::into_inner) = UpdateState::Available(release);
+                ctx.request_repaint();
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(error = %format!("{error:#}"), "Update check failed"),
+        });
+    }
+
+    /// Installs `release` in the background; the app restarts into the new version on success.
+    fn install_update(&self, ctx: &egui::Context, release: Release) {
+        self.set_update_state(UpdateState::Installing(release.clone()));
+        let this = self.update.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || match update::install(&release) {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                *this.lock().unwrap_or_else(PoisonError::into_inner) =
+                    UpdateState::Failed(release, format!("{error:#}"));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Update offer pinned to the bottom of the sidebar.
+    fn update_card(&mut self, ui: &mut Ui) {
+        let state = self.update_state();
+        let release = match &state {
+            UpdateState::None => return,
+            UpdateState::Available(r) | UpdateState::Installing(r) | UpdateState::Failed(r, _) => r.clone(),
+        };
+        let pal = palette(ui);
+        egui::Panel::bottom("update")
+            .show_separator_line(false)
+            .frame(egui::Frame::new().inner_margin(Margin { top: 8, ..Margin::ZERO }))
+            .show(ui, |ui| {
+                widgets::banner(ui, pal.accent_soft, pal.accent, |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    ui.label(RichText::new(format!("새 버전 {}", release.version)).bold().color(pal.text));
+                    match &state {
+                        UpdateState::Installing(_) => {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(14.0).color(pal.accent));
+                                ui.label(RichText::new("내려받아 설치하는 중…").color(pal.text_weak));
+                            });
+                        }
+                        UpdateState::Failed(_, error) => {
+                            ui.label(RichText::new("업데이트하지 못했습니다").color(pal.danger));
+                            ui.label(RichText::new(error).small().color(pal.text_weak));
+                        }
+                        _ => {}
+                    }
+                    if !matches!(state, UpdateState::Installing(_)) {
+                        ui.horizontal(|ui| {
+                            let busy = self.sessions.any_active();
+                            let label = if matches!(state, UpdateState::Failed(..)) { "다시 시도" } else { "업데이트" };
+                            let button = ui
+                                .add_enabled_ui(!busy, |ui| widgets::primary_button(ui, label))
+                                .inner
+                                .on_hover_text("내려받아 설치한 뒤 HopDesk를 다시 시작합니다")
+                                .on_disabled_hover_text("접속을 모두 종료한 뒤 업데이트하세요");
+                            if button.clicked() {
+                                self.install_update(ui.ctx(), release.clone());
+                            }
+                            if ui.link("변경 사항").clicked() {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(&release.page_url));
+                            }
+                        });
+                    }
+                });
+            });
     }
 
     fn profile(&self, id: Uuid) -> Option<&Profile> {
@@ -371,6 +477,8 @@ impl Launcher {
             }
             ui.add_space(6.0);
         }
+
+        self.update_card(ui);
 
         let list: Vec<Profile> = self.filtered().into_iter().cloned().collect();
         let mut clicked = None;

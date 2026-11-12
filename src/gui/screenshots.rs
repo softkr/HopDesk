@@ -138,4 +138,10 @@ fn screenshots() {
     shot(&mut h, "08-direct-connecting");
     h.state_mut().apply_nav(Nav::Edit(direct_id));
     shot(&mut h, "09-direct-edit");
+
+    // 10. Update offered in the sidebar
+    let h_launcher = Launcher::with_store(ProfileStore::from_profiles(sample()), Sessions::default());
+    h_launcher.set_update_state(super::UpdateState::Available(crate::update::Release::for_test("0.1.4")));
+    let mut h = harness(h_launcher, false);
+    shot(&mut h, "10-update-available");
 }

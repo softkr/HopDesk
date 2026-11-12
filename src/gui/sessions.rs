@@ -71,6 +71,11 @@ impl Sessions {
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Whether any session is connecting or connected.
+    pub fn any_active(&self) -> bool {
+        self.lock().sessions.values().any(|s| s.state.is_active())
+    }
+
     pub fn state(&self, id: Uuid) -> Option<State> {
         self.lock().sessions.get(&id).map(|s| s.state.clone())
     }

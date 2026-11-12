@@ -23,6 +23,7 @@ winit = { version = "0.30", features = ["rwh_06"] }
 keyring = "4"
 directories = "6"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.11"

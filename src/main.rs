@@ -24,6 +24,7 @@ mod session;
 mod status;
 mod trust;
 mod tunnel;
+mod update;
 
 use std::fs;
 use std::io::{IsTerminal as _, Write as _};
