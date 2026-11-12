@@ -4,7 +4,8 @@ SSH 점프 호스트를 거쳐 Windows PC에 원격 데스크톱(RDP)으로 접�
 
 | 운영체제 | 파일 |
 |---|---|
-| macOS 11 이상 (Apple Silicon, Intel) | `HopDesk-{{VERSION}}-macos-universal.dmg` |
+| macOS 11 이상 (Apple Silicon: M1 이후) | `HopDesk-{{VERSION}}-macos-apple-silicon.dmg` |
+| macOS 11 이상 (Intel) | `HopDesk-{{VERSION}}-macos-intel.dmg` |
 | Windows 10 / 11 (64비트) | `HopDesk-{{VERSION}}-windows-x64.zip` |
 | Linux (x86_64, glibc 2.35 이상) | `HopDesk-{{VERSION}}-linux-x86_64.tar.gz` |
 

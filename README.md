@@ -28,7 +28,8 @@ HopDesk가 SSH 터널을 열고 저장된 계정으로 Windows에 자동 로그�
 
 | 운영체제 | 파일 | 설치 |
 |---|---|---|
-| macOS 11 이상 (Apple Silicon, Intel) | `…-macos-universal.dmg` | dmg를 열고 HopDesk를 응용 프로그램 폴더로 끌어 놓기 |
+| macOS 11 이상 (Apple Silicon: M1 이후) | `…-macos-apple-silicon.dmg` | dmg를 열고 HopDesk를 응용 프로그램 폴더로 끌어 놓기 |
+| macOS 11 이상 (Intel) | `…-macos-intel.dmg` | 위와 같음 |
 | Windows 10 / 11 (64비트) | `…-windows-x64.zip` | 압축을 풀고 `HopDesk.exe` 실행 |
 | Linux (x86_64) | `…-linux-x86_64.tar.gz` | 압축을 풀고 `./install.sh` 실행 (앱 메뉴에 등록) |
 
@@ -134,7 +135,7 @@ SSH 채널을 전송 계층으로 쓰기 위한 작은 패치를 적용했으며
 
 ### 릴리스
 
-`main`에 푸시하면 GitHub Actions([.github/workflows/release.yml](.github/workflows/release.yml))가 macOS(유니버설), Windows, Linux용 패키지를 빌드하고 릴리스를 만듭니다.
+`main`에 푸시하면 GitHub Actions([.github/workflows/release.yml](.github/workflows/release.yml))가 macOS(Apple Silicon·Intel 각각), Windows, Linux용 패키지를 빌드하고 릴리스를 만듭니다.
 버전은 자동으로 정해집니다: 같은 `major.minor`의 마지막 태그에서 패치 번호를 1 올립니다(`v0.1.0` → `v0.1.1`).
 메이저·마이너를 올리려면 `Cargo.toml`의 `version`을 바꿔 푸시합니다(예: `0.2.0`이면 다음 릴리스가 `v0.2.0`).
 Actions 탭에서 수동으로 실행하면 릴리스 없이 빌드만 하고, 결과물은 실행 기록에 첨부됩니다.

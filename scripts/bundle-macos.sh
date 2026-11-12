@@ -1,30 +1,41 @@
 #!/bin/sh
 # Builds a release binary and wraps it in target/release/HopDesk.app.
-# Usage: scripts/bundle-macos.sh [--universal] [--install]
-#   --universal  one binary for Apple Silicon and Intel
-#                (needs: rustup target add aarch64-apple-darwin x86_64-apple-darwin)
-#   --install    copy the app to /Applications
+# Usage: scripts/bundle-macos.sh [--universal | --target <triple>] [--install]
+#   --universal        one binary for Apple Silicon and Intel
+#                      (needs: rustup target add aarch64-apple-darwin x86_64-apple-darwin)
+#   --target <triple>  build for one architecture, e.g. x86_64-apple-darwin (Intel)
+#   --install          copy the app to /Applications
 set -eu
 
 cd "$(dirname "$0")/.."
 
 UNIVERSAL=0
 INSTALL=0
-for arg in "$@"; do
-    case "$arg" in
+TARGET=
+while [ $# -gt 0 ]; do
+    case "$1" in
         --universal) UNIVERSAL=1 ;;
         --install) INSTALL=1 ;;
-        *) echo "unknown option: $arg" >&2; exit 2 ;;
+        --target) TARGET=${2:?--target needs a triple}; shift ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
+    shift
 done
 
-if [ "$UNIVERSAL" = 1 ]; then
+# Cargo's own outputs are never overwritten, so a later native build is not mistaken for current.
+if [ -n "$TARGET" ]; then
+    cargo build --release --target "$TARGET"
+    BIN="target/$TARGET/release/hopdesk"
+elif [ "$UNIVERSAL" = 1 ]; then
     cargo build --release --target aarch64-apple-darwin
     cargo build --release --target x86_64-apple-darwin
-    lipo -create -output target/release/hopdesk \
+    mkdir -p target/universal
+    BIN=target/universal/hopdesk
+    lipo -create -output "$BIN" \
         target/aarch64-apple-darwin/release/hopdesk target/x86_64-apple-darwin/release/hopdesk
 else
     cargo build --release
+    BIN=target/release/hopdesk
 fi
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
@@ -32,7 +43,7 @@ APP=target/release/HopDesk.app
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/hopdesk "$APP/Contents/MacOS/hopdesk"
+cp "$BIN" "$APP/Contents/MacOS/hopdesk"
 cp assets/icon/HopDesk.icns "$APP/Contents/Resources/HopDesk.icns"
 
 cat > "$APP/Contents/Info.plist" <<EOF
