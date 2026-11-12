@@ -2,7 +2,11 @@
 //!
 //! Closing the launcher window only hides it, so HopDesk keeps running after an accidental close.
 //! The icon's menu opens the window again, checks for an update, or quits.
+//!
+//! On macOS the icon only stands in for the hidden window: while the window is open, the app menu
+//! (with its own "업데이트 확인") is there instead, so the icon is hidden.
 
+use std::cell::Cell;
 use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,9 +21,15 @@ const TRAY_ICON: &[u8] = include_bytes!("../../assets/icon/icon-tray-44.png");
 
 pub struct Tray {
     /// Removes the icon when dropped.
-    _icon: TrayIcon,
+    icon: TrayIcon,
+    icon_visible: Cell<bool>,
+    /// The launcher window is hidden: set when it is closed, cleared when the menu shows it.
+    hidden: Arc<AtomicBool>,
     /// Set by the "종료" menu item, so the following close request is let through.
     quitting: Arc<AtomicBool>,
+    /// Keeps the app menu alive.
+    #[cfg(target_os = "macos")]
+    _app_menu: Menu,
 }
 
 impl Tray {
@@ -37,16 +47,23 @@ impl Tray {
         let builder = builder.with_icon(icon()?);
         let icon = builder.build().context("tray icon")?;
 
+        // The app menu's own item: one menu item belongs to one menu.
+        let app_check = MenuItem::new("업데이트 확인", true, None);
+        #[cfg(target_os = "macos")]
+        let app_menu = app_menu(&app_check)?;
+
         let quitting = Arc::new(AtomicBool::new(false));
-        let (open_id, check_id, quit_id) = (open.id().clone(), check.id().clone(), quit.id().clone());
+        let hidden = Arc::new(AtomicBool::new(false));
+        let (open_id, quit_id) = (open.id().clone(), quit.id().clone());
+        let check_ids = [check.id().clone(), app_check.id().clone()];
         let ctx = ctx.clone();
-        let quit_flag = Arc::clone(&quitting);
+        let (quit_flag, hidden_flag) = (Arc::clone(&quitting), Arc::clone(&hidden));
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             if event.id == open_id {
-                show(&ctx);
-            } else if event.id == check_id {
+                show(&ctx, &hidden_flag);
+            } else if check_ids.contains(&event.id) {
                 // The result appears in the window, so bring it up.
-                show(&ctx);
+                show(&ctx, &hidden_flag);
                 let _ = check_update.send(());
             } else if event.id == quit_id {
                 quit_flag.store(true, Ordering::Relaxed);
@@ -54,25 +71,83 @@ impl Tray {
                 ctx.request_repaint();
             }
         }));
-        Ok(Self { _icon: icon, quitting })
+        let tray = Self {
+            icon,
+            icon_visible: Cell::new(true),
+            hidden,
+            quitting,
+            #[cfg(target_os = "macos")]
+            _app_menu: app_menu,
+        };
+        tray.sync_icon();
+        Ok(tray)
     }
 
-    /// Call every frame: turns closing the window into hiding it, unless quitting from the menu.
+    /// Call every frame: turns closing the window into hiding it, unless quitting from the menu,
+    /// and shows the icon only while it is needed.
     pub fn hide_on_close(&self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting.load(Ordering::Relaxed) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             set_in_dock(false);
+            self.hidden.store(true, Ordering::Relaxed);
+        }
+        self.sync_icon();
+    }
+
+    /// macOS shows the icon only while the window is hidden; Windows always shows it.
+    fn sync_icon(&self) {
+        let visible = !cfg!(target_os = "macos") || self.hidden.load(Ordering::Relaxed);
+        if visible == self.icon_visible.get() {
+            return;
+        }
+        match self.icon.set_visible(visible) {
+            Ok(()) => self.icon_visible.set(visible),
+            Err(error) => tracing::warn!(error = %error, "Tray icon visibility unchanged"),
         }
     }
 }
 
-fn show(ctx: &egui::Context) {
+fn show(ctx: &egui::Context, hidden: &AtomicBool) {
+    hidden.store(false, Ordering::Relaxed);
     set_in_dock(true);
     ctx.send_viewport_cmd(ViewportCommand::Visible(true));
     ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(ViewportCommand::Focus);
     ctx.request_repaint();
+}
+
+/// The macOS app menu (replaces winit's default), with "업데이트 확인" under "HopDesk에 관하여".
+#[cfg(target_os = "macos")]
+fn app_menu(check_update: &MenuItem) -> anyhow::Result<Menu> {
+    use tray_icon::menu::{AboutMetadata, Submenu};
+
+    let about = AboutMetadata {
+        name: Some("HopDesk".to_owned()),
+        version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        ..AboutMetadata::default()
+    };
+    let app = Submenu::with_items(
+        "HopDesk",
+        true,
+        &[
+            &PredefinedMenuItem::about(Some("HopDesk에 관하여"), Some(about)),
+            &PredefinedMenuItem::separator(),
+            check_update,
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::services(Some("서비스")),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::hide(Some("HopDesk 가리기")),
+            &PredefinedMenuItem::hide_others(Some("기타 가리기")),
+            &PredefinedMenuItem::show_all(Some("모두 보기")),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::quit(Some("HopDesk 종료")),
+        ],
+    )
+    .context("app menu")?;
+    let menu = Menu::with_items(&[&app]).context("app menu")?;
+    menu.init_for_nsapp();
+    Ok(menu)
 }
 
 #[cfg(target_os = "macos")]
