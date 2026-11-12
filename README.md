@@ -133,14 +133,9 @@ SSH 채널을 전송 계층으로 쓰기 위한 작은 패치를 적용했으며
 
 ### 릴리스
 
-`Cargo.toml`의 `version`을 올리고 커밋한 뒤 같은 버전의 태그를 올립니다.
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-GitHub Actions([.github/workflows/release.yml](.github/workflows/release.yml))가 macOS(유니버설), Windows, Linux용 패키지를 빌드하고 릴리스를 만듭니다.
+`main`에 푸시하면 GitHub Actions([.github/workflows/release.yml](.github/workflows/release.yml))가 macOS(유니버설), Windows, Linux용 패키지를 빌드하고 릴리스를 만듭니다.
+버전은 자동으로 정해집니다: 같은 `major.minor`의 마지막 태그에서 패치 번호를 1 올립니다(`v0.1.0` → `v0.1.1`).
+메이저·마이너를 올리려면 `Cargo.toml`의 `version`을 바꿔 푸시합니다(예: `0.2.0`이면 다음 릴리스가 `v0.2.0`).
 Actions 탭에서 수동으로 실행하면 릴리스 없이 빌드만 하고, 결과물은 실행 기록에 첨부됩니다.
 릴리스 설명은 [.github/release-notes.md](.github/release-notes.md)를 바탕으로 만들어집니다.
 
