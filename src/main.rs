@@ -29,7 +29,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, bail};
 use clap::{Args, Parser, Subcommand};
 
-use crate::profile::{JumpHost, Profile, ProfileStore, RdpTarget, Secret};
+use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, RdpTarget, Secret};
 use crate::trust::TrustStore;
 use crate::tunnel::{JumpParams, Tunnel};
 
@@ -85,6 +85,9 @@ struct AddArgs {
     width: u16,
     #[arg(long, default_value_t = 1080)]
     height: u16,
+    /// How the session window starts; --width/--height apply to `fixed`.
+    #[arg(long, value_enum, default_value_t)]
+    display: DisplayMode,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -140,6 +143,7 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
         },
         width: args.width,
         height: args.height,
+        display: args.display,
     };
     store.add(profile.clone())?;
 

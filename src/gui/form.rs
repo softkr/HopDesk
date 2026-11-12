@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::theme::{Bold as _, palette};
 use super::widgets::{self, card, field, section_title, text_input};
-use crate::profile::{JumpHost, Profile, ProfileStore, RdpTarget, Secret};
+use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, RdpTarget, Secret};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Field {
@@ -57,6 +57,7 @@ pub struct Form {
     change_rdp_password: bool,
     width: String,
     height: String,
+    display: DisplayMode,
     custom_resolution: bool,
     /// Errors from the last save attempt; refreshed live afterwards.
     errors: Errors,
@@ -92,6 +93,7 @@ impl Form {
             change_rdp_password: true,
             width: "1920".into(),
             height: "1080".into(),
+            display: DisplayMode::default(),
             custom_resolution: false,
             errors: Errors::new(),
             attempted: false,
@@ -120,6 +122,7 @@ impl Form {
             change_rdp_password: false,
             width: p.width.to_string(),
             height: p.height.to_string(),
+            display: p.display,
             custom_resolution: !RESOLUTIONS.contains(&(p.width, p.height)),
             errors: Errors::new(),
             attempted: false,
@@ -222,6 +225,7 @@ impl Form {
             },
             width,
             height,
+            display: self.display,
         })
     }
 
@@ -394,31 +398,49 @@ impl Form {
                 section_title(ui, "화면", None);
                 field(ui, "해상도", err(Field::Resolution), |ui| {
                     ui.horizontal(|ui| {
-                        let current = format!("{} × {}", self.width.trim(), self.height.trim());
-                        let selected = if self.custom_resolution { "직접 입력".to_owned() } else { current };
+                        let fixed = self.display == DisplayMode::Fixed;
+                        let custom = fixed && self.custom_resolution;
+                        let selected = if !fixed {
+                            self.display.label().to_owned()
+                        } else if custom {
+                            "직접 입력".to_owned()
+                        } else {
+                            format!("{} × {}", self.width.trim(), self.height.trim())
+                        };
                         egui::ComboBox::from_id_salt("resolution")
                             .selected_text(selected)
                             .width(180.0)
                             .show_ui(ui, |ui| {
+                                for mode in [DisplayMode::Fullscreen, DisplayMode::Maximized] {
+                                    if ui.selectable_label(self.display == mode, mode.label()).clicked() {
+                                        self.display = mode;
+                                    }
+                                }
                                 for (w, h) in RESOLUTIONS {
-                                    let is = !self.custom_resolution
+                                    let is = fixed
+                                        && !self.custom_resolution
                                         && self.width.trim() == w.to_string()
                                         && self.height.trim() == h.to_string();
                                     if ui.selectable_label(is, format!("{w} × {h}")).clicked() {
                                         self.width = w.to_string();
                                         self.height = h.to_string();
+                                        self.display = DisplayMode::Fixed;
                                         self.custom_resolution = false;
                                     }
                                 }
-                                if ui.selectable_label(self.custom_resolution, "직접 입력").clicked() {
+                                if ui.selectable_label(custom, "직접 입력").clicked() {
+                                    self.display = DisplayMode::Fixed;
                                     self.custom_resolution = true;
                                 }
                             });
-                        if self.custom_resolution {
+                        if custom {
                             let invalid = err(Field::Resolution).is_some();
                             ui.add(text_input(ui, &mut self.width, "가로", 70.0, invalid));
                             ui.label("×");
                             ui.add(text_input(ui, &mut self.height, "세로", 70.0, invalid));
+                        }
+                        if self.display == DisplayMode::Fullscreen {
+                            ui.label(RichText::new("Ctrl+Alt+Enter로 창 모드 전환").small().color(pal.text_weak));
                         }
                     });
                 });

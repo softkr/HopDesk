@@ -19,6 +19,12 @@ use the real target host instead of a local port-forward address.
 
 The factory is called on every connection attempt, so auto-reconnect reopens the channel.
 
+### Local patch: `ironrdp-viewer-window-mode.patch`
+
+Adds `App::with_maximized` / `App::with_fullscreen` to `ironrdp-viewer` so the desktop window can
+open maximized or in borderless fullscreen, and a local Ctrl+Alt+Enter shortcut that toggles
+fullscreen instead of reaching the session.
+
 Search for `[PATCH HopDesk]` to find the changed code.
 
 ### Updating IronRDP
@@ -28,6 +34,7 @@ rm -rf third_party/IronRDP
 git clone --depth 1 https://github.com/Devolutions/IronRDP third_party/IronRDP
 rm -rf third_party/IronRDP/.git
 (cd third_party/IronRDP && patch -p1 < ../ironrdp-custom-transport.patch)
+(cd third_party/IronRDP && patch -p1 < ../ironrdp-viewer-window-mode.patch)
 ```
 
 Consider proposing the custom transport upstream so the patch can be dropped.

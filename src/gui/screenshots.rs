@@ -32,6 +32,7 @@ fn profile(name: &str, jump: &str, target: &str, user: &str, key: bool) -> Profi
         },
         width: 1920,
         height: 1080,
+        display: crate::profile::DisplayMode::Fixed,
     }
 }
 

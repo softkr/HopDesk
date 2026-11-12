@@ -90,9 +90,29 @@ pub struct RpcApp {
     /// Whether releasing every held key and button after a focus loss waits for room in the
     /// session input queue.
     release_pending: bool,
+    /// [PATCH HopDesk] The desktop window opens maximized.
+    start_maximized: bool,
+    /// [PATCH HopDesk] The desktop window opens in borderless fullscreen.
+    start_fullscreen: bool,
+    /// [PATCH HopDesk] Modifier state for the local fullscreen shortcut.
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 impl App {
+    /// [PATCH HopDesk] Opens the desktop window maximized.
+    #[must_use]
+    pub fn with_maximized(mut self, maximized: bool) -> Self {
+        self.inner.start_maximized = maximized;
+        self
+    }
+
+    /// [PATCH HopDesk] Opens the desktop window in borderless fullscreen; Ctrl+Alt+Enter toggles it.
+    #[must_use]
+    pub fn with_fullscreen(mut self, fullscreen: bool) -> Self {
+        self.inner.start_fullscreen = fullscreen;
+        self
+    }
+
     /// Creates the viewer; with `remote_app`, each RemoteApp window opens as a local window
     /// instead of a desktop window.
     pub fn new(
@@ -168,6 +188,9 @@ impl RpcApp {
             rail_windows: RailWindows::default(),
             pending_rail_inputs: std::collections::VecDeque::new(),
             release_pending: false,
+            start_maximized: false,
+            start_fullscreen: false,
+            modifiers: winit::keyboard::ModifiersState::empty(),
         })
     }
 
@@ -436,7 +459,13 @@ impl RpcApp {
         }
         let window_attributes = WindowAttributes::default()
             .with_title("IronRDP")
-            .with_inner_size(self.initial_window_size);
+            .with_inner_size(self.initial_window_size)
+            // [PATCH HopDesk]
+            .with_maximized(self.start_maximized)
+            .with_fullscreen(
+                self.start_fullscreen
+                    .then_some(winit::window::Fullscreen::Borderless(None)),
+            );
         match event_loop.create_window(window_attributes) {
             Ok(window) => {
                 let window = Arc::new(window);
@@ -465,6 +494,25 @@ impl RpcApp {
             }
             return;
         };
+
+        // [PATCH HopDesk] Ctrl+Alt+Enter toggles fullscreen locally instead of reaching the session.
+        if let WindowEvent::ModifiersChanged(modifiers) = &event {
+            self.modifiers = modifiers.state();
+        }
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event
+            && key.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::Enter)
+            && self.modifiers.control_key()
+            && self.modifiers.alt_key()
+        {
+            if key.state.is_pressed() && !key.repeat {
+                let fullscreen = window
+                    .fullscreen()
+                    .is_none()
+                    .then_some(winit::window::Fullscreen::Borderless(None));
+                window.set_fullscreen(fullscreen);
+            }
+            return;
+        }
 
         match event {
             WindowEvent::Resized(size) => {

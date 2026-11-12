@@ -5,7 +5,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, RichText, Sense, Stroke,
 use super::sessions::{FailureInfo, State};
 use super::theme::{Bold as _, HEADING_SIZE, Palette, TITLE_SIZE, bold_family, palette};
 use super::widgets::{self, Icon, card};
-use crate::profile::Profile;
+use crate::profile::{DisplayMode, Profile};
 
 pub enum Action {
     None,
@@ -46,7 +46,11 @@ pub fn ui(ui: &mut Ui, profile: &Profile, state: Option<&State>, log: &[String])
                 let t = &profile.target;
                 widgets::info_row(ui, &pal, "원격 PC", &format!("{}:{}", t.host, t.port));
                 widgets::info_row(ui, &pal, "Windows 계정", &account(profile));
-                widgets::info_row(ui, &pal, "해상도", &format!("{} × {}", profile.width, profile.height));
+                let resolution = match profile.display {
+                    DisplayMode::Fixed => format!("{} × {}", profile.width, profile.height),
+                    mode => mode.label().to_owned(),
+                };
+                widgets::info_row(ui, &pal, "해상도", &resolution);
             });
         });
 

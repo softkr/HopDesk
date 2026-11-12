@@ -13,7 +13,7 @@ use tracing::{error, warn};
 use winit::dpi::PhysicalSize;
 use winit::event_loop::EventLoop;
 
-use crate::profile::Profile;
+use crate::profile::{DisplayMode, Profile};
 use crate::status::{self, Phase};
 use crate::trust::{Kind, TrustStore, Verdict, sha256_hex};
 use crate::tunnel::Tunnel;
@@ -38,7 +38,12 @@ pub fn run(profile: &Profile, rdp_password: String, tunnel: Arc<Tunnel>, trust: 
 
     let client = RdpClient::new(config, output_event_sender);
     let input_event_sender = client.input_sender();
-    let mut app = App::new(&event_loop, &input_event_sender, initial_window_size, false).context("create viewer")?;
+    // Maximized and fullscreen windows connect at the profile resolution; the viewer then asks
+    // the server to match the window size.
+    let mut app = App::new(&event_loop, &input_event_sender, initial_window_size, false)
+        .context("create viewer")?
+        .with_maximized(profile.display == DisplayMode::Maximized)
+        .with_fullscreen(profile.display == DisplayMode::Fullscreen);
 
     let output_forwarder = rt.spawn(async move {
         while let Some(event) = output_event_receiver.recv().await {

@@ -23,6 +23,31 @@ pub struct Profile {
     pub width: u16,
     #[serde(default = "default_height")]
     pub height: u16,
+    #[serde(default)]
+    pub display: DisplayMode,
+}
+
+/// How the session window starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayMode {
+    /// Window and session of `width` x `height`.
+    Fixed,
+    /// Maximized window, session sized to the monitor.
+    Maximized,
+    /// Borderless fullscreen, session sized to the monitor (Ctrl+Alt+Enter toggles).
+    #[default]
+    Fullscreen,
+}
+
+impl DisplayMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplayMode::Fixed => "고정 해상도",
+            DisplayMode::Maximized => "자동 (창 최대화)",
+            DisplayMode::Fullscreen => "전체 화면",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,5 +192,34 @@ impl ProfileStore {
             .position(|p| p.name == name)
             .with_context(|| format!("no profile named `{name}`"))?;
         Ok(self.profiles.remove(index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROFILE: &str = r#"
+        [[profile]]
+        id = "00000000-0000-0000-0000-000000000001"
+        name = "office"
+        jump = { host = "bastion", port = 22, user = "me" }
+        target = { host = "10.0.0.5", port = 3389, user = "Administrator" }
+    "#;
+
+    #[test]
+    fn profile_without_display_opens_fullscreen() {
+        let store: ProfileStore = toml::from_str(PROFILE).expect("parse");
+        assert_eq!(store.profiles()[0].display, DisplayMode::Fullscreen);
+    }
+
+    #[test]
+    fn display_mode_round_trips_as_lowercase() {
+        let mut store: ProfileStore = toml::from_str(PROFILE).expect("parse");
+        store.profiles[0].display = DisplayMode::Maximized;
+        let text = toml::to_string_pretty(&store).expect("serialize");
+        assert!(text.contains("display = \"maximized\""), "{text}");
+        let store: ProfileStore = toml::from_str(&text).expect("parse");
+        assert_eq!(store.profiles()[0].display, DisplayMode::Maximized);
     }
 }
