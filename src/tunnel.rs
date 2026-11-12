@@ -71,6 +71,8 @@ impl Tunnel {
         let config = Arc::new(client::Config {
             inactivity_timeout: None,
             keepalive_interval: Some(Duration::from_secs(30)),
+            // Input and frame acknowledgements are small packets; Nagle would delay them.
+            nodelay: true,
             ..Default::default()
         });
         let verifier = HostKeyVerifier {

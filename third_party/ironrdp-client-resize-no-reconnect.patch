@@ -1,0 +1,93 @@
+diff --git a/crates/ironrdp-client/src/rdp.rs b/crates/ironrdp-client/src/rdp.rs
+index 52f850b..e9d1a39 100644
+--- a/crates/ironrdp-client/src/rdp.rs
++++ b/crates/ironrdp-client/src/rdp.rs
+@@ -1172,6 +1172,8 @@ pub struct RdpClient {
+     graceful_close_receiver: watch::Receiver<bool>,
+     auto_reconnect_maximum_attempts: Option<u32>,
+     desktop_update_enabled: bool,
++    /// [PATCH HopDesk] Whether a resize Display Control cannot apply reconnects with the new size.
++    resize_reconnect: bool,
+     #[cfg(feature = "clipboard")]
+     cliprdr_backend_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
+     #[cfg(feature = "rdpdr")]
+@@ -1197,6 +1199,7 @@ impl RdpClient {
+             graceful_close_receiver,
+             auto_reconnect_maximum_attempts: None,
+             desktop_update_enabled: false,
++            resize_reconnect: true,
+             #[cfg(feature = "clipboard")]
+             cliprdr_backend_factory: None,
+             #[cfg(feature = "rdpdr")]
+@@ -1252,6 +1255,16 @@ impl RdpClient {
+         self
+     }
+ 
++    /// [PATCH HopDesk] Drops a resize that Display Control cannot apply instead of disconnecting
++    /// and starting a new session with the requested size.
++    ///
++    /// The session keeps its size; the embedder scales the frame to its window.
++    #[must_use]
++    pub fn without_resize_reconnect(mut self) -> Self {
++        self.resize_reconnect = false;
++        self
++    }
++
+     pub async fn run(mut self) {
+         if *self.close_receiver.borrow_and_update() {
+             self.emit_user_initiated_termination();
+@@ -1700,6 +1713,7 @@ impl RdpClient {
+                 self.config.rail_initial_execute.clone(),
+                 &self.output_event_sender,
+                 self.desktop_update_enabled,
++                self.resize_reconnect,
+                 &mut self.input_event_receiver,
+                 &mut self.clipboard_event_receiver,
+                 &mut self.close_receiver,
+@@ -4626,6 +4640,7 @@ async fn active_session(
+     initial_rail_execute: Option<ExecutePdu>,
+     output_event_sender: &crate::output_channel::OutputEventSender,
+     desktop_update_enabled: bool,
++    resize_reconnect: bool,
+     input_event_receiver: &mut mpsc::Receiver<RdpInputEvent>,
+     clipboard_event_receiver: &mut mpsc::UnboundedReceiver<RdpInputEvent>,
+     close_receiver: &mut watch::Receiver<bool>,
+@@ -4989,6 +5004,10 @@ async fn active_session(
+                                     ActiveSessionIteration::with_outputs(dvc_batch?, outputs)
+                                 }
+                             }
++                        } else if !resize_reconnect {
++                            // [PATCH HopDesk]
++                            info!("Display Control is unavailable; keeping the session size");
++                            ActiveSessionIteration::outputs(Vec::new())
+                         } else {
+                             // TODO(#271): use the "auto-reconnect cookie": https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/15b0d1c9-2891-4adb-a45e-deb4aeeeab7c
+                             debug!("Reconnecting with new size");
+@@ -5337,7 +5356,14 @@ async fn active_session(
+                 let (request, reason) = resize_queue
+                     .timed_out_request(tokio::time::Instant::now())
+                     .expect("resize deadline must correspond to a queued request");
+-                return Ok(request.reconnect_with_new_size(reason));
++                if resize_reconnect {
++                    return Ok(request.reconnect_with_new_size(reason));
++                }
++                // [PATCH HopDesk]
++                info!(?reason, "Resize was not applied in time; keeping the session size");
++                resize_queue.in_flight = None;
++                resize_queue.pending = None;
++                ActiveSessionIteration::outputs(Vec::new())
+                 }
+                 _ = async {
+                     match rail_queue_release_deadline {
+@@ -6173,6 +6199,11 @@ async fn active_session(
+                         }
+                     }
+                 }
++                None if !resize_reconnect => {
++                    // [PATCH HopDesk]
++                    info!("Display Control is unavailable; keeping the session size");
++                    resize_queue.pending = None;
++                }
+                 None => {
+                     debug!("Reconnecting because Display Control is unavailable");
+                     return Ok(request.reconnect_with_new_size(DisplayResizeFallbackReason::DisplayControlUnavailable));

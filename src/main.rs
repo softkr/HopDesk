@@ -58,7 +58,13 @@ enum Command {
         rdp: bool,
     },
     /// Connect using a profile (automatic login with the stored credentials).
-    Connect { name: String },
+    Connect {
+        name: String,
+        /// Screen size in logical points (`WIDTHxHEIGHT`) used as the initial session size for
+        /// fullscreen and maximized profiles; the launcher passes its monitor size.
+        #[arg(long, value_parser = parse_screen_size)]
+        screen: Option<(u16, u16)>,
+    },
     /// Forget pinned SSH host keys / RDP certificates of a host.
     Forget { host: String },
 }
@@ -112,7 +118,7 @@ fn main() -> anyhow::Result<()> {
         Command::SetPassword { name, jump, .. } => {
             set_password(&name, if jump { Secret::Jump } else { Secret::Rdp })
         }
-        Command::Connect { name } => connect(&name).inspect_err(|e| status::emit(status::Phase::Failed, &format!("{e:#}"))),
+        Command::Connect { name, screen } => connect(&name, screen).inspect_err(|e| status::emit(status::Phase::Failed, &format!("{e:#}"))),
         Command::Forget { host } => {
             let removed = TrustStore::load()?.forget(&host)?;
             println!("removed {removed} pinned entr{} for `{host}`", if removed == 1 { "y" } else { "ies" });
@@ -192,7 +198,7 @@ fn set_password(name: &str, which: Secret) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn connect(name: &str) -> anyhow::Result<()> {
+fn connect(name: &str, screen: Option<(u16, u16)>) -> anyhow::Result<()> {
     let store = ProfileStore::load()?;
     let profile = store.get(name)?.clone();
     let trust = Arc::new(TrustStore::load()?);
@@ -213,7 +219,7 @@ fn connect(name: &str) -> anyhow::Result<()> {
         Arc::clone(&trust),
     );
 
-    session::run(&profile, rdp_password, tunnel, trust)
+    session::run(&profile, screen, rdp_password, tunnel, trust)
 }
 
 fn prompt_and_store(profile: &Profile, which: Secret) -> anyhow::Result<()> {
@@ -236,6 +242,21 @@ fn parse_host_port(s: &str, default_port: u16) -> anyhow::Result<(String, u16)> 
         }
         _ => Ok((s.trim_matches(['[', ']']).to_owned(), default_port)),
     }
+}
+
+/// Parses `WIDTHxHEIGHT` within the range RDP accepts for a desktop.
+fn parse_screen_size(s: &str) -> Result<(u16, u16), String> {
+    const MIN: u16 = 200;
+    const MAX: u16 = 8192;
+    let (w, h) = s.split_once('x').ok_or_else(|| format!("expected WIDTHxHEIGHT, got `{s}`"))?;
+    let parse = |v: &str| {
+        v.trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|n| (MIN..=MAX).contains(n))
+            .ok_or_else(|| format!("size must be {MIN}–{MAX}, got `{v}`"))
+    };
+    Ok((parse(w)?, parse(h)?))
 }
 
 fn parse_user_host_port(s: &str, default_port: u16) -> anyhow::Result<(String, String, u16)> {
@@ -277,4 +298,17 @@ pub fn write_private_file(path: &Path, content: &[u8]) -> anyhow::Result<()> {
     }
     let mut file = options.open(path).with_context(|| format!("open {}", path.display()))?;
     file.write_all(content).with_context(|| format!("write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_screen_size;
+
+    #[test]
+    fn screen_size_parses_within_rdp_limits() {
+        assert_eq!(parse_screen_size("1470x956"), Ok((1470, 956)));
+        assert!(parse_screen_size("1470").is_err());
+        assert!(parse_screen_size("100x956").is_err());
+        assert!(parse_screen_size("9000x956").is_err());
+    }
 }

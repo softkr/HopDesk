@@ -118,8 +118,14 @@ impl Sessions {
             return Ok(());
         }
         let exe = std::env::current_exe().context("locate hopdesk executable")?;
-        let mut child = Command::new(exe)
-            .args(["connect", name])
+        let mut command = Command::new(exe);
+        command.args(["connect", name]);
+        // Monitor size in points, so fullscreen sessions start at the right resolution.
+        if let Some(size) = ctx.input(|i| i.viewport().monitor_size) {
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "monitor sizes fit u16")]
+            command.arg(format!("--screen={}x{}", size.x.round() as u16, size.y.round() as u16));
+        }
+        let mut child = command
             .env(status::ENV_VAR, "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

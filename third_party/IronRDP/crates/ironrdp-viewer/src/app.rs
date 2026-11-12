@@ -94,6 +94,13 @@ pub struct RpcApp {
     start_maximized: bool,
     /// [PATCH HopDesk] The desktop window opens in borderless fullscreen.
     start_fullscreen: bool,
+    /// [PATCH HopDesk] Whether the session desktop follows the window size and DPI.
+    follow_window_size: bool,
+    /// [PATCH HopDesk] Window title; the session desktop size is appended to it.
+    title: String,
+    /// [PATCH HopDesk] One session pixel per logical point: the initial window size is in points and
+    /// resize requests send the window size in points at 100% scale.
+    logical_pixels: bool,
     /// [PATCH HopDesk] Modifier state for the local fullscreen shortcut.
     modifiers: winit::keyboard::ModifiersState,
 }
@@ -103,6 +110,29 @@ impl App {
     #[must_use]
     pub fn with_maximized(mut self, maximized: bool) -> Self {
         self.inner.start_maximized = maximized;
+        self
+    }
+
+    /// [PATCH HopDesk] Maps one session pixel to one logical point, like most RDP clients on HiDPI
+    /// displays: normal text size, and a quarter of the pixels to transfer and decode at 200%.
+    #[must_use]
+    pub fn with_logical_pixels(mut self, logical: bool) -> Self {
+        self.inner.logical_pixels = logical;
+        self
+    }
+
+    /// [PATCH HopDesk] Sets the window title; the session desktop size is shown after it.
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.inner.title = title.into();
+        self
+    }
+
+    /// [PATCH HopDesk] Keeps the session at its connection size and scale instead of following
+    /// the window; the frame is scaled to the window instead.
+    #[must_use]
+    pub fn with_follow_window_size(mut self, follow: bool) -> Self {
+        self.inner.follow_window_size = follow;
         self
     }
 
@@ -190,6 +220,9 @@ impl RpcApp {
             release_pending: false,
             start_maximized: false,
             start_fullscreen: false,
+            follow_window_size: true,
+            title: "IronRDP".to_owned(),
+            logical_pixels: false,
             modifiers: winit::keyboard::ModifiersState::empty(),
         })
     }
@@ -349,7 +382,15 @@ impl RpcApp {
         // The viewer window spans a single monitor, so the session gets one primary monitor at the
         // window DPI. A scale outside 100..=500 percent is clamped when the layout is encoded.
         #[expect(clippy::as_conversions, reason = "casting f64 to u32")]
-        let scale_factor = (window.scale_factor() * 100.0).round() as u32;
+        let mut scale_factor = (window.scale_factor() * 100.0).round() as u32;
+        // [PATCH HopDesk]
+        let size = if self.logical_pixels {
+            scale_factor = 100;
+            let logical = size.to_logical::<u32>(window.scale_factor());
+            PhysicalSize::new(logical.width, logical.height)
+        } else {
+            size
+        };
 
         let width = u16::try_from(size.width).expect("reasonable width");
         let height = u16::try_from(size.height).expect("reasonable height");
@@ -419,11 +460,30 @@ impl RpcApp {
         if self.buffer.is_empty() {
             return;
         }
-        let Some((_, surface)) = self.window.as_mut() else {
+        let Some((window, surface)) = self.window.as_mut() else {
             return;
         };
+        // [PATCH HopDesk] Stretch the frame over the whole client area, matching the input mapping
+        // in `desktop_position`. Some backends (macOS) present the surface 1:1 in physical pixels
+        // instead, which halves the session on HiDPI displays and leaves it in a corner.
+        let window_size = window.inner_size();
+        let (Some(target_width), Some(target_height)) =
+            (NonZeroU32::new(window_size.width), NonZeroU32::new(window_size.height))
+        else {
+            return;
+        };
+        let (source_width, source_height) = (usize::from(self.buffer_size.0), usize::from(self.buffer_size.1));
+        if source_width * source_height != self.buffer.len() {
+            return;
+        }
+        surface.resize(target_width, target_height).expect("surface resize");
         let mut sb_buffer = surface.buffer_mut().expect("surface buffer");
-        sb_buffer.copy_from_slice(self.buffer.as_slice());
+        let (target_width, target_height) = (sb_buffer.width().get() as usize, sb_buffer.height().get() as usize);
+        if (target_width, target_height) == (source_width, source_height) {
+            sb_buffer.copy_from_slice(self.buffer.as_slice());
+        } else {
+            scale_nearest(&self.buffer, source_width, source_height, &mut sb_buffer, target_width, target_height);
+        }
         sb_buffer.present().expect("buffer present");
     }
     fn on_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -458,8 +518,15 @@ impl RpcApp {
             return;
         }
         let window_attributes = WindowAttributes::default()
-            .with_title("IronRDP")
-            .with_inner_size(self.initial_window_size)
+            .with_title(self.title.clone())
+            .with_inner_size(if self.logical_pixels {
+                winit::dpi::Size::from(winit::dpi::LogicalSize::new(
+                    self.initial_window_size.width,
+                    self.initial_window_size.height,
+                ))
+            } else {
+                self.initial_window_size.into()
+            })
             // [PATCH HopDesk]
             .with_maximized(self.start_maximized)
             .with_fullscreen(
@@ -515,6 +582,10 @@ impl RpcApp {
         }
 
         match event {
+            // [PATCH HopDesk] A fixed-size session ignores window size and DPI changes.
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } if !self.follow_window_size => {
+                window.request_redraw();
+            }
             WindowEvent::Resized(size) => {
                 self.last_size = Some(size);
                 self.resize_timeout = Some(Instant::now() + Duration::from_secs(1));
@@ -718,7 +789,17 @@ impl RpcApp {
             RdpOutputEvent::MonitorLayoutRejected => {
                 warn!("The server cannot accept the requested monitor layout");
             }
-            RdpOutputEvent::LoginComplete => info!("RDP login complete"),
+            RdpOutputEvent::LoginComplete => {
+                info!("RDP login complete");
+                // [PATCH HopDesk] Display Control opens with the logon, so a resize sent from the
+                // logon screen may have been dropped: send the window size again.
+                if self.follow_window_size
+                    && let Some((window, _)) = self.window.as_ref()
+                {
+                    self.last_size = Some(window.inner_size());
+                    self.resize_timeout = Some(Instant::now() + Duration::from_secs(1));
+                }
+            }
             // The viewer sends absolute pointer events only, so no input depends on these flags.
             RdpOutputEvent::ServerInputFlags(_) => {}
             RdpOutputEvent::RemoteSessionId(session_id) => debug!(session_id, "Remote session ID"),
@@ -728,6 +809,12 @@ impl RpcApp {
             }
             RdpOutputEvent::Image { buffer, width, height } => {
                 trace!(width = ?width, height = ?height, "Received image with size");
+                // [PATCH HopDesk] Show the session desktop size, which the remote settings may hide.
+                if self.buffer_size != (width.get(), height.get())
+                    && let Some((window, _)) = self.window.as_ref()
+                {
+                    window.set_title(&format!("{} — {} × {}", self.title, width, height));
+                }
                 self.buffer_size = (width.get(), height.get());
                 self.buffer = buffer;
                 if let Some((window, surface)) = self.window.as_mut() {
@@ -979,6 +1066,25 @@ impl ApplicationHandler<RdpOutputEvent> for App {
 }
 
 /// Maps a window position onto the remote desktop, which the viewer stretches over the client area.
+/// [PATCH HopDesk] Nearest-neighbor scaling of a packed `0x00RRGGBB` frame.
+fn scale_nearest(
+    source: &[u32],
+    source_width: usize,
+    source_height: usize,
+    target: &mut [u32],
+    target_width: usize,
+    target_height: usize,
+) {
+    let columns: Vec<usize> = (0..target_width).map(|x| x * source_width / target_width).collect();
+    for (y, target_row) in target.chunks_exact_mut(target_width).take(target_height).enumerate() {
+        let source_row_start = (y * source_height / target_height) * source_width;
+        let source_row = &source[source_row_start..source_row_start + source_width];
+        for (pixel, &column) in target_row.iter_mut().zip(&columns) {
+            *pixel = source_row[column];
+        }
+    }
+}
+
 fn desktop_position(
     window_size: PhysicalSize<u32>,
     desktop_size: (u16, u16),
