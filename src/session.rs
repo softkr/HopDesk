@@ -12,7 +12,10 @@ use ironrdp_tls::{CertificateValidation, CertificateValidationCallback};
 use ironrdp_viewer::app::App;
 use tracing::{error, info, warn};
 use winit::dpi::PhysicalSize;
-use winit::event_loop::EventLoop;
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::window::WindowId;
 
 use crate::profile::{DisplayMode, Profile};
 use crate::status::{self, Phase};
@@ -21,11 +24,12 @@ use crate::tunnel::Tunnel;
 
 /// `screen` is the client screen size in logical points: fullscreen and maximized sessions start
 /// at that size, so the server does not have to resize right after logon.
+/// Without `tunnel` the session connects straight to the RDP target.
 pub fn run(
     profile: &Profile,
     screen: Option<(u16, u16)>,
     rdp_password: String,
-    tunnel: Arc<Tunnel>,
+    tunnel: Option<Arc<Tunnel>>,
     trust: Arc<TrustStore>,
 ) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -34,8 +38,10 @@ pub fn run(
         .context("create tokio runtime")?;
 
     // Fail fast on SSH problems before any window opens.
-    status::emit(Phase::Ssh, "");
-    rt.block_on(tunnel.ensure_connected())?;
+    if let Some(tunnel) = &tunnel {
+        status::emit(Phase::Ssh, "");
+        rt.block_on(tunnel.ensure_connected())?;
+    }
     status::emit(Phase::Rdp, "");
 
     let desktop = match (profile.display, screen) {
@@ -57,7 +63,7 @@ pub fn run(
     // Maximized and fullscreen windows connect at the profile resolution; the viewer then asks
     // the server to match the window size in points. A fixed session keeps the profile
     // resolution and is scaled to the window.
-    let mut app = App::new(&event_loop, &input_event_sender, initial_window_size, false)
+    let app = App::new(&event_loop, &input_event_sender, initial_window_size, false)
         .context("create viewer")?
         .with_maximized(profile.display == DisplayMode::Maximized)
         .with_fullscreen(profile.display == DisplayMode::Fullscreen)
@@ -83,8 +89,55 @@ pub fn run(
         }
     });
 
-    event_loop.run_app(&mut app)?;
+    event_loop.run_app(&mut SessionWindow::new(app, &profile.name))?;
     Ok(())
+}
+
+/// The viewer, plus a Dock tile that tells the session apart from the launcher (macOS).
+struct SessionWindow {
+    app: App,
+    #[cfg_attr(not(target_os = "macos"), expect(dead_code, reason = "used for the macOS Dock tile"))]
+    profile_name: String,
+    dock_marked: bool,
+}
+
+impl SessionWindow {
+    fn new(app: App, profile_name: &str) -> Self {
+        Self {
+            app,
+            profile_name: profile_name.to_owned(),
+            dock_marked: false,
+        }
+    }
+}
+
+impl ApplicationHandler<RdpOutputEvent> for SessionWindow {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // The app has finished launching here, so the Dock tile is no longer reset to the bundle icon.
+        if !self.dock_marked {
+            self.dock_marked = true;
+            #[cfg(target_os = "macos")]
+            crate::dock::mark_session(&self.profile_name);
+        }
+        self.app.resumed(event_loop);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        self.app.window_event(event_loop, window_id, event);
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RdpOutputEvent) {
+        self.app.user_event(event_loop, event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.app.about_to_wait(event_loop);
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        crate::dock::leave_dock();
+    }
 }
 
 /// Last session size reported by the server (`width << 16 | height`), to log changes only.
@@ -113,16 +166,21 @@ fn build_config(
     profile: &Profile,
     (desktop_width, desktop_height): (u16, u16),
     rdp_password: String,
-    tunnel: Arc<Tunnel>,
+    tunnel: Option<Arc<Tunnel>>,
     trust: Arc<TrustStore>,
 ) -> anyhow::Result<ironrdp_client::config::Config> {
-    let target_host = profile.target.host.clone();
-    let target_port = profile.target.port;
-    let transport = CustomTransport::new(move || {
-        let tunnel = Arc::clone(&tunnel);
-        let host = target_host.clone();
-        Box::pin(async move { tunnel.open(&host, target_port).await })
-    });
+    let transport = match tunnel {
+        Some(tunnel) => {
+            let target_host = profile.target.host.clone();
+            let target_port = profile.target.port;
+            TransportKind::Custom(CustomTransport::new(move || {
+                let tunnel = Arc::clone(&tunnel);
+                let host = target_host.clone();
+                Box::pin(async move { tunnel.open(&host, target_port).await })
+            }))
+        }
+        None => TransportKind::Direct,
+    };
 
     // RDP servers usually present self-signed certificates: strict validation fails and this
     // callback pins the certificate on first use, then requires the same one afterwards.
@@ -155,7 +213,7 @@ fn build_config(
         .with_password(rdp_password)
         // Send the stored credentials in Client Info so the server skips its logon screen.
         .with_autologon(true)
-        .with_transport(TransportKind::Custom(transport))
+        .with_transport(transport)
         .with_certificate_validation(CertificateValidation::Strict)
         .with_certificate_validation_callback(cert_callback)
         .with_client_build(client_build())

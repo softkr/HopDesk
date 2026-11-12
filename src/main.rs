@@ -1,8 +1,8 @@
-//! HopDesk: RDP desktop client that reaches Windows hosts through an SSH jump host.
+//! HopDesk: RDP desktop client that reaches Windows hosts through an SSH jump host, or directly.
 //!
 //! ```text
 //! hopdesk                (no arguments: profile manager window)
-//! hopdesk add <name> --jump user@bastion[:22] [--jump-key ~/.ssh/id_ed25519]
+//! hopdesk add <name> [--jump user@bastion[:22] [--jump-key ~/.ssh/id_ed25519]]
 //!                        --target 10.0.0.5[:3389] --user Administrator [--domain CORP]
 //! hopdesk list
 //! hopdesk connect <name>
@@ -14,6 +14,8 @@
 // Windows: no console window when the launcher is double-clicked (see `attach_parent_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod dock;
 mod gui;
 mod profile;
 mod session;
@@ -72,9 +74,9 @@ enum Command {
 #[derive(Args)]
 struct AddArgs {
     name: String,
-    /// Jump host as `user@host[:port]`.
+    /// Jump host as `user@host[:port]`; without it the profile connects straight to the target.
     #[arg(long)]
-    jump: String,
+    jump: Option<String>,
     /// Private key for the jump host (password authentication when omitted).
     #[arg(long)]
     jump_key: Option<PathBuf>,
@@ -129,18 +131,25 @@ fn main() -> anyhow::Result<()> {
 
 fn add(args: AddArgs) -> anyhow::Result<()> {
     let mut store = ProfileStore::load()?;
-    let (jump_user, jump_host, jump_port) = parse_user_host_port(&args.jump, 22)?;
+    let jump = match &args.jump {
+        Some(jump) => {
+            let (user, host, port) = parse_user_host_port(jump, 22)?;
+            JumpHost {
+                host,
+                port,
+                user,
+                key_path: args.jump_key,
+            }
+        }
+        None => JumpHost::unset(),
+    };
     let (target_host, target_port) = parse_host_port(&args.target, 3389)?;
 
     let profile = Profile {
         id: uuid::Uuid::new_v4(),
         name: args.name,
-        jump: JumpHost {
-            host: jump_host,
-            port: jump_port,
-            user: jump_user,
-            key_path: args.jump_key,
-        },
+        use_jump: args.jump.is_some(),
+        jump,
         target: RdpTarget {
             host: target_host,
             port: target_port,
@@ -153,7 +162,9 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
     };
     store.add(profile.clone())?;
 
-    prompt_and_store(&profile, Secret::Jump)?;
+    if profile.use_jump {
+        prompt_and_store(&profile, Secret::Jump)?;
+    }
     prompt_and_store(&profile, Secret::Rdp)?;
     store.save()?;
     println!("added profile `{}`", profile.name);
@@ -166,13 +177,15 @@ fn list() -> anyhow::Result<()> {
         println!("no profiles (use `hopdesk add`)");
     }
     for p in store.profiles() {
-        let auth = if p.jump.key_path.is_some() { "key" } else { "password" };
+        let route = if p.use_jump {
+            let auth = if p.jump.key_path.is_some() { "key" } else { "password" };
+            format!("{}@{}:{} ({auth})", p.jump.user, p.jump.host, p.jump.port)
+        } else {
+            "direct".to_owned()
+        };
         println!(
-            "{:<16} {}@{}:{} ({auth}) -> {}{}@{}:{}",
+            "{:<16} {route} -> {}{}@{}:{}",
             p.name,
-            p.jump.user,
-            p.jump.host,
-            p.jump.port,
             p.target.domain.as_deref().map(|d| format!("{d}\\")).unwrap_or_default(),
             p.target.user,
             p.target.host,
@@ -203,21 +216,25 @@ fn connect(name: &str, screen: Option<(u16, u16)>) -> anyhow::Result<()> {
     let profile = store.get(name)?.clone();
     let trust = Arc::new(TrustStore::load()?);
 
-    let jump_secret = profile.secret(Secret::Jump)?.filter(|s| !s.is_empty());
     let rdp_password = profile
         .secret(Secret::Rdp)?
         .context("no stored RDP password (use `set-password --rdp`)")?;
 
-    let tunnel = Tunnel::new(
-        JumpParams {
-            host: profile.jump.host.clone(),
-            port: profile.jump.port,
-            user: profile.jump.user.clone(),
-            key_path: profile.jump.key_path.clone(),
-            secret: jump_secret,
-        },
-        Arc::clone(&trust),
-    );
+    let tunnel = if profile.use_jump {
+        let jump_secret = profile.secret(Secret::Jump)?.filter(|s| !s.is_empty());
+        Some(Tunnel::new(
+            JumpParams {
+                host: profile.jump.host.clone(),
+                port: profile.jump.port,
+                user: profile.jump.user.clone(),
+                key_path: profile.jump.key_path.clone(),
+                secret: jump_secret,
+            },
+            Arc::clone(&trust),
+        ))
+    } else {
+        None
+    };
 
     session::run(&profile, screen, rdp_password, tunnel, trust)
 }

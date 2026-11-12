@@ -37,12 +37,16 @@ pub fn ui(ui: &mut Ui, profile: &Profile, state: Option<&State>, log: &[String])
             widgets::section_title(ui, "연결 정보", None);
             egui::Grid::new("details").num_columns(2).min_row_height(20.0).spacing([28.0, 8.0]).show(ui, |ui| {
                 let j = &profile.jump;
-                widgets::info_row(ui, &pal, "점프 호스트", &format!("{}@{}:{}", j.user, j.host, j.port));
-                let auth = match &j.key_path {
-                    Some(path) => format!("개인 키 · {}", tilde(path)),
-                    None => "비밀번호".to_owned(),
-                };
-                widgets::info_row(ui, &pal, "SSH 인증", &auth);
+                if profile.use_jump {
+                    widgets::info_row(ui, &pal, "점프 호스트", &format!("{}@{}:{}", j.user, j.host, j.port));
+                    let auth = match &j.key_path {
+                        Some(path) => format!("개인 키 · {}", tilde(path)),
+                        None => "비밀번호".to_owned(),
+                    };
+                    widgets::info_row(ui, &pal, "SSH 인증", &auth);
+                } else {
+                    widgets::info_row(ui, &pal, "점프 호스트", "사용 안 함 (직접 접속)");
+                }
                 let t = &profile.target;
                 widgets::info_row(ui, &pal, "원격 PC", &format!("{}:{}", t.host, t.port));
                 widgets::info_row(ui, &pal, "Windows 계정", &account(profile));
@@ -127,7 +131,7 @@ enum Node {
 
 fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     use Node::*;
-    let (nodes, links) = match state {
+    let (mut nodes, mut links) = match state {
         None => ([Idle, Idle, Idle], [Idle, Idle]),
         Some(State::Starting | State::Ssh) => ([Done, Active, Idle], [Active, Idle]),
         Some(State::Rdp) => ([Done, Done, Active], [Done, Active]),
@@ -138,18 +142,39 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     };
 
     let jump_auth = if profile.jump.key_path.is_some() { "개인 키" } else { "비밀번호" };
-    let labels = [
+    let mut labels = vec![
         (Icon::Laptop, super::platform::THIS_DEVICE.to_owned(), "로컬".to_owned()),
         (Icon::Gateway, "점프 호스트".to_owned(), format!("{} · {jump_auth}", profile.jump.host)),
         (Icon::Monitor, "원격 PC".to_owned(), format!("{}:{}", profile.target.host, profile.target.port)),
     ];
+    let mut positions = vec![0.16, 0.5, 0.84];
+    if !profile.use_jump {
+        // Direct connection: this device -> remote PC. A failure before RDP is the remote PC's.
+        labels.remove(1);
+        positions = vec![0.25, 0.75];
+        let remote = match nodes[2] {
+            Idle if nodes[1] == Error => Error,
+            Idle if nodes[1] == Active => Active,
+            other => other,
+        };
+        let link = if links[0] == Error || links[1] == Error {
+            Error
+        } else if links[1] == Idle {
+            links[0]
+        } else {
+            links[1]
+        };
+        nodes = [nodes[0], remote, Idle];
+        links = [link, Idle];
+    }
+    let node_count = labels.len();
 
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 88.0), Sense::hover());
     let painter = ui.painter_at(rect.expand(4.0));
     let r = 22.0;
     let cy = rect.top() + r + 4.0;
-    let xs = [0.16, 0.5, 0.84].map(|f| rect.left() + rect.width() * f);
+    let xs: Vec<f32> = positions.iter().map(|f| rect.left() + rect.width() * f).collect();
     let color = |n: Node| match n {
         Idle => pal.border,
         Done => pal.success,
@@ -159,7 +184,7 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     let time = ui.input(|i| i.time);
     let mut animating = false;
 
-    for (i, link) in links.iter().enumerate() {
+    for (i, link) in links.iter().take(node_count - 1).enumerate() {
         let a = Pos2::new(xs[i] + r + 6.0, cy);
         let b = Pos2::new(xs[i + 1] - r - 6.0, cy);
         let c = color(*link);
@@ -192,7 +217,7 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
         painter.line_segment([b, b + Vec2::new(-6.0, 5.0)], Stroke::new(2.0, c));
     }
 
-    for (i, node) in nodes.iter().enumerate() {
+    for (i, node) in nodes.iter().take(node_count).enumerate() {
         let center = Pos2::new(xs[i], cy);
         let c = color(*node);
         let (fill, ring) = match node {

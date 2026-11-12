@@ -18,6 +18,7 @@ fn profile(name: &str, jump: &str, target: &str, user: &str, key: bool) -> Profi
     Profile {
         id: Uuid::new_v4(),
         name: name.into(),
+        use_jump: true,
         jump: JumpHost {
             host: jump.into(),
             port: 22,
@@ -126,4 +127,15 @@ fn screenshots() {
     let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(profiles), Sessions::default()), true);
     h.state_mut().apply_nav(Nav::Edit(ids[0]));
     shot(&mut h, "07-edit-dark");
+
+    // 8. Direct connection (no jump host): detail while connecting, then the edit form
+    let mut direct = profile("집 PC", "", "pc.example.com", "hong", false);
+    direct.use_jump = false;
+    let direct_id = direct.id;
+    let sessions = Sessions::default();
+    sessions.set_for_test(direct_id, State::Rdp, vec![]);
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![direct]), sessions), false);
+    shot(&mut h, "08-direct-connecting");
+    h.state_mut().apply_nav(Nav::Edit(direct_id));
+    shot(&mut h, "09-direct-edit");
 }

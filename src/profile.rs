@@ -17,6 +17,10 @@ const KEYRING_SERVICE: &str = "HopDesk";
 pub struct Profile {
     pub id: Uuid,
     pub name: String,
+    /// Connect through the SSH jump host; otherwise straight to the RDP target.
+    /// The jump host settings are kept while disabled.
+    #[serde(default = "default_use_jump")]
+    pub use_jump: bool,
     pub jump: JumpHost,
     pub target: RdpTarget,
     #[serde(default = "default_width")]
@@ -66,6 +70,22 @@ pub struct RdpTarget {
     pub port: u16,
     pub user: String,
     pub domain: Option<String>,
+}
+
+fn default_use_jump() -> bool {
+    true
+}
+
+impl JumpHost {
+    /// Placeholder for a profile created without a jump host.
+    pub fn unset() -> Self {
+        Self {
+            host: String::new(),
+            port: 22,
+            user: String::new(),
+            key_path: None,
+        }
+    }
 }
 
 fn default_width() -> u16 {
@@ -211,6 +231,12 @@ mod tests {
     fn profile_without_display_opens_fullscreen() {
         let store: ProfileStore = toml::from_str(PROFILE).expect("parse");
         assert_eq!(store.profiles()[0].display, DisplayMode::Fullscreen);
+    }
+
+    #[test]
+    fn profile_without_use_jump_keeps_the_jump_host() {
+        let store: ProfileStore = toml::from_str(PROFILE).expect("parse");
+        assert!(store.profiles()[0].use_jump);
     }
 
     #[test]

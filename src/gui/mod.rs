@@ -249,7 +249,10 @@ impl Launcher {
     fn forget_keys(&mut self, ctx: &egui::Context, id: Uuid) {
         let Some(profile) = self.profile(id).cloned() else { return };
         let result = TrustStore::load()
-            .and_then(|trust| Ok(trust.forget(&profile.jump.host)? + trust.forget(&profile.target.host)?));
+            .and_then(|trust| {
+                let jump = if profile.use_jump { trust.forget(&profile.jump.host)? } else { 0 };
+                Ok(jump + trust.forget(&profile.target.host)?)
+            });
         match result {
             Ok(0) => self.toast(ctx, ToastKind::Info, "저장된 호스트 키가 없습니다"),
             Ok(n) => {
@@ -469,7 +472,7 @@ impl Launcher {
             Dialog::ForgetKeys(id) => {
                 let hosts = self
                     .profile(id)
-                    .map(|p| format!("{}, {}", p.jump.host, p.target.host))
+                    .map(|p| if p.use_jump { format!("{}, {}", p.jump.host, p.target.host) } else { p.target.host.clone() })
                     .unwrap_or_default();
                 (
                     "호스트 키를 초기화할까요?".to_owned(),

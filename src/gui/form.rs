@@ -65,7 +65,10 @@ pub struct Form {
     /// `None` while creating a new profile.
     pub id: Option<Uuid>,
     stored_auth: Option<Auth>,
+    /// `use_jump` of the stored profile; `None` while creating a new profile.
+    stored_use_jump: Option<bool>,
     name: String,
+    use_jump: bool,
     jump_host: String,
     jump_port: String,
     jump_user: String,
@@ -102,7 +105,9 @@ impl Form {
         Self {
             id: None,
             stored_auth: None,
+            stored_use_jump: None,
             name: String::new(),
+            use_jump: true,
             jump_host: String::new(),
             jump_port: "22".into(),
             jump_user: String::new(),
@@ -131,7 +136,9 @@ impl Form {
         Self {
             id: Some(p.id),
             stored_auth: Some(auth),
+            stored_use_jump: Some(p.use_jump),
             name: p.name.clone(),
+            use_jump: p.use_jump,
             jump_host: p.jump.host.clone(),
             jump_port: p.jump.port.to_string(),
             jump_user: p.jump.user.clone(),
@@ -175,6 +182,12 @@ impl Form {
         self.stored_auth.is_some_and(|a| a != self.auth)
     }
 
+    /// The jump host secret must be (re-)entered: new profile, other auth method, or the jump
+    /// host was just enabled on a profile that connected directly.
+    fn jump_secret_required(&self) -> bool {
+        self.is_new() || self.auth_switched() || self.stored_use_jump == Some(false)
+    }
+
     /// Validates every field and builds the profile.
     pub fn validate(&self, store: &ProfileStore) -> Result<Profile, Errors> {
         let mut errors = Errors::new();
@@ -187,14 +200,26 @@ impl Form {
         };
 
         let name = required(Field::Name, &self.name, "이름을 입력하세요");
-        let jump_host = required(Field::JumpHost, &self.jump_host, "점프 호스트 주소를 입력하세요");
-        let jump_user = required(Field::JumpUser, &self.jump_user, "SSH 사용자 이름을 입력하세요");
+        // Disabled jump host settings are kept as typed, without validation.
+        let (jump_host, jump_user, key_path) = if self.use_jump {
+            (
+                required(Field::JumpHost, &self.jump_host, "점프 호스트 주소를 입력하세요"),
+                required(Field::JumpUser, &self.jump_user, "SSH 사용자 이름을 입력하세요"),
+                match self.auth {
+                    Auth::Key => Some(required(Field::KeyPath, &self.key_path, "개인 키 파일을 선택하세요")),
+                    Auth::Password => None,
+                },
+            )
+        } else {
+            let key = self.key_path.trim();
+            (
+                self.jump_host.trim().to_owned(),
+                self.jump_user.trim().to_owned(),
+                (self.auth == Auth::Key && !key.is_empty()).then(|| key.to_owned()),
+            )
+        };
         let target_host = required(Field::TargetHost, &self.target_host, "원격 PC 주소를 입력하세요");
         let rdp_user = required(Field::RdpUser, &self.rdp_user, "Windows 사용자 이름을 입력하세요");
-        let key_path = match self.auth {
-            Auth::Key => Some(required(Field::KeyPath, &self.key_path, "개인 키 파일을 선택하세요")),
-            Auth::Password => None,
-        };
 
         if !name.is_empty()
             && store
@@ -204,10 +229,14 @@ impl Form {
         {
             errors.insert(Field::Name, "같은 이름의 연결이 이미 있습니다".into());
         }
-        let jump_port = parse_port(&self.jump_port).unwrap_or_else(|| {
-            errors.insert(Field::JumpPort, "1–65535".into());
-            0
-        });
+        let jump_port = match parse_port(&self.jump_port) {
+            Some(port) => port,
+            None if self.use_jump => {
+                errors.insert(Field::JumpPort, "1–65535".into());
+                0
+            }
+            None => 22,
+        };
         let target_port = parse_port(&self.target_port).unwrap_or_else(|| {
             errors.insert(Field::TargetPort, "1–65535".into());
             0
@@ -221,7 +250,8 @@ impl Form {
             }
         };
 
-        let needs_jump_secret = self.auth == Auth::Password && (self.is_new() || self.auth_switched() || self.change_jump_secret);
+        let needs_jump_secret =
+            self.use_jump && self.auth == Auth::Password && (self.jump_secret_required() || self.change_jump_secret);
         if needs_jump_secret && self.jump_secret.is_empty() {
             errors.insert(Field::JumpSecret, "비밀번호를 입력하세요".into());
         }
@@ -236,6 +266,7 @@ impl Form {
         Ok(Profile {
             id: self.id.unwrap_or_else(Uuid::new_v4),
             name,
+            use_jump: self.use_jump,
             jump: JumpHost {
                 host: jump_host,
                 port: jump_port,
@@ -256,7 +287,7 @@ impl Form {
 
     /// Writes changed secrets to the credential store, then saves the profile list.
     pub fn commit(&self, profile: &Profile, store: &mut ProfileStore) -> anyhow::Result<()> {
-        let write_jump = self.is_new() || self.auth_switched() || self.change_jump_secret;
+        let write_jump = self.use_jump && (self.jump_secret_required() || self.change_jump_secret);
         let write_rdp = self.is_new() || self.change_rdp_password;
         store.upsert(profile.clone())?;
         if write_jump {
@@ -290,7 +321,7 @@ impl Form {
             ui.vertical(|ui| {
                 ui.label(RichText::new(if self.is_new() { "새 연결" } else { "연결 편집" }).size(super::theme::HEADING_SIZE).bold());
                 ui.label(
-                    RichText::new("SSH 점프 호스트를 거쳐 원격 Windows PC에 접속합니다.").color(pal.text_weak),
+                    RichText::new("원격 Windows PC에 직접 또는 SSH 점프 호스트를 거쳐 접속합니다.").color(pal.text_weak),
                 );
             });
         });
@@ -339,6 +370,16 @@ impl Form {
                     "SSH 점프 호스트",
                     Some("원격 PC로 들어가는 관문 역할을 하는 SSH 서버입니다."),
                 );
+                field(ui, "사용", None, |ui| {
+                    widgets::segmented(ui, &mut self.use_jump, &[(true, "사용"), (false, "사용 안 함 (직접 접속)")]);
+                });
+                if !self.use_jump {
+                    ui.label(
+                        RichText::new("점프 호스트 없이 원격 PC에 바로 접속합니다. 입력해 둔 설정은 보관됩니다.")
+                            .color(pal.text_weak),
+                    );
+                    return;
+                }
                 host_port_row(
                     ui,
                     full,
@@ -374,7 +415,7 @@ impl Form {
                     Auth::Password => ("비밀번호", ""),
                     Auth::Key => ("키 암호", "암호가 없으면 비워 두세요"),
                 };
-                let force = self.is_new() || self.auth_switched();
+                let force = self.jump_secret_required();
                 secret_field(
                     ui,
                     full,
@@ -391,7 +432,11 @@ impl Form {
                 section_title(
                     ui,
                     "원격 PC (RDP)",
-                    Some("주소는 점프 호스트에서 접근하는 기준으로 입력하세요. 예: 10.0.0.5"),
+                    Some(if self.use_jump {
+                        "주소는 점프 호스트에서 접근하는 기준으로 입력하세요. 예: 10.0.0.5"
+                    } else {
+                        "이 기기에서 바로 접근할 수 있는 주소를 입력하세요. 예: pc.example.com"
+                    }),
                 );
                 host_port_row(
                     ui,

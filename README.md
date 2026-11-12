@@ -1,6 +1,6 @@
 # HopDesk
 
-SSH 점프 호스트(배스천)를 거쳐 사내망의 Windows PC에 원격 데스크톱(RDP)으로 접속하는 앱입니다. macOS, Windows, Linux에서 동작합니다.
+SSH 점프 호스트(배스천)를 거쳐 사내망의 Windows PC에 원격 데스크톱(RDP)으로 접속하는 앱입니다. 점프 호스트 없이 바로 접속할 수도 있습니다. macOS, Windows, Linux에서 동작합니다.
 
 터널을 따로 열고 원격 데스크톱 앱을 실행할 필요 없이, 저장한 연결을 고르고 **연결**을 누르면 됩니다.
 HopDesk가 SSH 터널을 열고 저장된 계정으로 Windows에 자동 로그인합니다.
@@ -57,8 +57,8 @@ sudo apt install pkg-config cmake libasound2-dev libfontconfig1-dev libxkbcommon
 
 1. HopDesk를 실행하고 **새 연결 만들기**(⌘N, Windows·Linux는 Ctrl+N)를 누릅니다.
 2. 아래 항목을 입력하고 저장합니다(⌘S).
-   - 점프 호스트의 주소, 사용자 이름, 인증 방식
-   - 원격 PC의 주소. 점프 호스트에서 보이는 주소(예: `10.0.0.5`)를 입력합니다.
+   - 점프 호스트의 주소, 사용자 이름, 인증 방식. 바로 접속할 PC라면 **사용 안 함 (직접 접속)**을 고릅니다(입력해 둔 점프 호스트 설정은 보관됩니다).
+   - 원격 PC의 주소. 점프 호스트를 쓰면 점프 호스트에서 보이는 주소(예: `10.0.0.5`)를, 직접 접속이면 이 기기에서 보이는 주소를 입력합니다.
    - Windows 계정
 3. 목록에서 연결을 고르고 **연결**(Enter)을 누릅니다. 원격 데스크톱은 별도 창으로 열립니다.
 
@@ -81,6 +81,7 @@ GUI 없이 터미널에서도 사용할 수 있습니다. 하위 명령 없이 �
 ```sh
 hopdesk add office --jump ubuntu@bastion.example.com:22 --jump-key ~/.ssh/id_ed25519 \
     --target 10.0.0.5:3389 --user hong --domain CORP
+hopdesk add home --target pc.example.com --user hong   # --jump 없이: 직접 접속
 hopdesk list
 hopdesk connect office
 hopdesk set-password office --rdp     # 저장된 비밀번호 변경 (--jump: 점프 호스트)

@@ -252,6 +252,12 @@ fn explain(detail: &str, log: &[String], state: &State) -> FailureInfo {
             "주소와 포트가 맞는지, 네트워크(VPN 등)에 연결되어 있는지 확인하세요.",
             false,
         )
+    } else if has("TCP connect") {
+        (
+            "원격 PC에 연결할 수 없습니다",
+            "주소와 포트가 맞는지, 네트워크(VPN 등)와 원격 데스크톱이 켜져 있는지 확인하세요.",
+            false,
+        )
     } else if has("direct-tcpip") {
         (
             "원격 PC에 도달할 수 없습니다",
@@ -283,6 +289,7 @@ fn explain(detail: &str, log: &[String], state: &State) -> FailureInfo {
             || (!key_changed
                 && !has("SSH connect to jump host")
                 && !has("direct-tcpip")
+                && !has("TCP connect")
                 && (has("logon") || has("credssp") || has("authentication") || has("password"))),
         at_remote: matches!(state, State::Rdp | State::Connected | State::Reconnecting) && !has("SSH HOST KEY CHANGED"),
     }
