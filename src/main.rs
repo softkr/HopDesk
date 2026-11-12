@@ -18,9 +18,13 @@
 mod clipboard;
 #[cfg(target_os = "macos")]
 mod dock;
+#[cfg(any(target_os = "macos", test))]
+mod file_offer;
+mod file_drop;
 mod gui;
 mod profile;
 mod session;
+mod shared_folder;
 mod status;
 mod trust;
 mod tunnel;

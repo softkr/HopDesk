@@ -59,11 +59,34 @@ pub fn run(
     // A resize the server cannot apply in place (e.g. from the logon screen) keeps the session
     // instead of disconnecting and logging on again; the viewer retries after logon.
     let client = RdpClient::new(config, output_event_sender).without_resize_reconnect();
+    // Shared folder as a redirected drive; a session without it still works.
+    let drop_folder = match crate::shared_folder::path() {
+        Ok(dir) => match crate::shared_folder::backend_factory(&dir) {
+            Ok(factory) => {
+                info!(folder = %dir.display(), drive = crate::shared_folder::DRIVE_NAME, "Sharing folder with the session");
+                Some((dir, factory))
+            }
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "Folder sharing unavailable");
+                None
+            }
+        },
+        Err(e) => {
+            warn!(error = %format!("{e:#}"), "Folder sharing unavailable");
+            None
+        }
+    };
+    let (client, drop_folder) = match drop_folder {
+        Some((dir, factory)) => (client.with_rdpdr_backend_factory(factory), Some(dir)),
+        None => (client, None),
+    };
     // The engine bridges the clipboard itself on Windows and Linux only.
     #[cfg(target_os = "macos")]
-    let client = {
+    let (client, clipboard_files) = {
         let proxy = ironrdp_viewer::clipboard::ClientClipboardMessageProxy::new(client.input_sender());
-        client.with_cliprdr_backend_factory(Box::new(crate::clipboard::MacClipboardFactory::new(proxy)))
+        let factory = crate::clipboard::MacClipboardFactory::new(proxy);
+        let files = factory.files();
+        (client.with_cliprdr_backend_factory(Box::new(factory)), files)
     };
     let input_event_sender = client.input_sender();
     // Maximized and fullscreen windows connect at the profile resolution; the viewer then asks
@@ -78,6 +101,13 @@ pub fn run(
         // pixels to transfer through the tunnel.
         .with_logical_pixels(true)
         .with_title(format!("HopDesk — {}", profile.name));
+    // Dropped files: pasted through the clipboard on macOS, else copied into the shared folder.
+    let app = app.with_drop_handler(crate::file_drop::handler(
+        drop_folder,
+        format!(r"\\tsclient\{}", crate::shared_folder::DRIVE_NAME),
+        #[cfg(target_os = "macos")]
+        Some(clipboard_files),
+    ));
 
     let output_forwarder = rt.spawn(async move {
         while let Some(event) = output_event_receiver.recv().await {

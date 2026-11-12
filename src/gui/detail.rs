@@ -55,6 +55,12 @@ pub fn ui(ui: &mut Ui, profile: &Profile, state: Option<&State>, log: &[String])
                     mode => mode.label().to_owned(),
                 };
                 widgets::info_row(ui, &pal, "해상도", &resolution);
+                widgets::info_row(
+                    ui,
+                    &pal,
+                    "공유 폴더",
+                    &format!(r"~/HopDesk 공유 → 원격 \\tsclient\{}", crate::shared_folder::DRIVE_NAME),
+                );
             });
         });
 

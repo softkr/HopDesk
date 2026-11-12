@@ -101,6 +101,12 @@ pub struct RpcApp {
     /// [PATCH HopDesk] One session pixel per logical point: the initial window size is in points and
     /// resize requests send the window size in points at 100% scale.
     logical_pixels: bool,
+    /// [PATCH HopDesk] Receives files dropped on the desktop window; see [`App::with_drop_handler`].
+    drop_handler: Option<DropHandler>,
+    /// [PATCH HopDesk] Files of the current drop; winit reports one event per file.
+    pending_drop: Vec<std::path::PathBuf>,
+    /// [PATCH HopDesk] Paste waiting for the session clipboard, and when it is abandoned.
+    pending_paste: Option<(DropPaste, Instant)>,
     /// [PATCH HopDesk] Modifier state for the local fullscreen shortcut.
     modifiers: winit::keyboard::ModifiersState,
 }
@@ -118,6 +124,15 @@ impl App {
     #[must_use]
     pub fn with_logical_pixels(mut self, logical: bool) -> Self {
         self.inner.logical_pixels = logical;
+        self
+    }
+
+    /// [PATCH HopDesk] Hands files dropped on the desktop window to `handler`. When it returns a
+    /// [`DropPaste`], the viewer clicks the drop position in the session and presses Ctrl+V once
+    /// `ready` is set (the session clipboard holds the files).
+    #[must_use]
+    pub fn with_drop_handler(mut self, handler: DropHandler) -> Self {
+        self.inner.drop_handler = Some(handler);
         self
     }
 
@@ -223,6 +238,9 @@ impl RpcApp {
             follow_window_size: true,
             title: "IronRDP".to_owned(),
             logical_pixels: false,
+            drop_handler: None,
+            pending_drop: Vec::new(),
+            pending_paste: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
         })
     }
@@ -498,8 +516,58 @@ impl RpcApp {
             || self.release_pending
             || !self.pending_rail_inputs.is_empty();
         let touch_retry = touch_pending.then(|| Instant::now() + Duration::from_millis(10));
-        let deadline = touch_retry.into_iter().chain(self.resize_deadline()).min();
+        let deadline = touch_retry
+            .into_iter()
+            .chain(self.resize_deadline())
+            .chain(self.drop_deadline())
+            .min();
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+
+    /// [PATCH HopDesk] Hands a finished drop to the handler, sends a paste that became ready, and
+    /// returns when to check again.
+    fn drop_deadline(&mut self) -> Option<Instant> {
+        if !self.pending_drop.is_empty() {
+            let paths = core::mem::take(&mut self.pending_drop);
+            if let (Some(handler), Some((window, _))) = (self.drop_handler.as_mut(), self.window.as_ref()) {
+                self.pending_paste = handler(window, paths).map(|paste| (paste, Instant::now() + DROP_PASTE_TIMEOUT));
+            }
+        }
+        let (paste, give_up) = self.pending_paste.as_ref()?;
+        if paste.ready.load(Ordering::Acquire) {
+            let position = paste.position;
+            self.pending_paste = None;
+            self.paste_at(position);
+            return None;
+        }
+        if Instant::now() >= *give_up {
+            warn!("The session clipboard did not take the dropped files in time; nothing pasted");
+            self.pending_paste = None;
+            return None;
+        }
+        Some(Instant::now() + DROP_PASTE_POLL)
+    }
+
+    /// [PATCH HopDesk] Clicks `position` in the session to focus what is there, then presses Ctrl+V.
+    fn paste_at(&mut self, position: PhysicalPosition<f64>) {
+        use ironrdp::input::{MouseButton, Operation, Scancode};
+        const CONTROL_LEFT: Scancode = Scancode::from_u8(false, 0x1D);
+        const KEY_V: Scancode = Scancode::from_u8(false, 0x2F);
+
+        let Some((window, _)) = self.window.as_ref() else {
+            return;
+        };
+        let at = desktop_position(window.inner_size(), self.buffer_size, position);
+        let operations = [
+            Operation::MouseMove(at),
+            Operation::MouseButtonPressed(MouseButton::Left),
+            Operation::MouseButtonReleased(MouseButton::Left),
+            Operation::KeyPressed(CONTROL_LEFT),
+            Operation::KeyPressed(KEY_V),
+            Operation::KeyReleased(KEY_V),
+            Operation::KeyReleased(CONTROL_LEFT),
+        ];
+        apply_and_send_fast_path_events(&self.input_target, &mut self.input_database, operations);
     }
 
     /// Sends a resize that is due and returns when the next one is.
@@ -608,9 +676,8 @@ impl RpcApp {
                     }
                 }
             }
-            WindowEvent::DroppedFile(_) => {
-                // TODO(#110): File upload
-            }
+            // [PATCH HopDesk] Collected and handed over from `on_about_to_wait`.
+            WindowEvent::DroppedFile(path) => self.pending_drop.push(path),
             // WindowEvent::ReceivedCharacter(_) => {
             // Sadly, we can't use this winit event to send RDP unicode events because
             // of the several reasons:
@@ -1067,6 +1134,21 @@ impl ApplicationHandler<RdpOutputEvent> for App {
 }
 
 /// Maps a window position onto the remote desktop, which the viewer stretches over the client area.
+/// [PATCH HopDesk] Receives the files of one drop and the window; returns where to paste them.
+pub type DropHandler = Box<dyn FnMut(&Arc<Window>, Vec<std::path::PathBuf>) -> Option<DropPaste>>;
+
+/// [PATCH HopDesk] A paste of dropped files at `position` (window client area, physical pixels),
+/// sent once `ready` is set.
+pub struct DropPaste {
+    pub position: PhysicalPosition<f64>,
+    pub ready: Arc<AtomicBool>,
+}
+
+/// [PATCH HopDesk] How long a drop waits for the session clipboard before the paste is dropped.
+const DROP_PASTE_TIMEOUT: Duration = Duration::from_secs(10);
+/// [PATCH HopDesk] How often a pending paste checks whether the clipboard is ready.
+const DROP_PASTE_POLL: Duration = Duration::from_millis(50);
+
 /// [PATCH HopDesk] Nearest-neighbor scaling of a packed `0x00RRGGBB` frame.
 fn scale_nearest(
     source: &[u32],

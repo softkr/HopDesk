@@ -2780,6 +2780,7 @@ dependencies = [
  "ironrdp-cliprdr",
  "ironrdp-core 0.3.1",
  "ironrdp-pdu",
+ "ironrdp-rdpdr-native",
  "ironrdp-tls",
  "ironrdp-viewer",
  "keyring",

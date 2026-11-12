@@ -12,6 +12,8 @@ ironrdp-client = { path = "third_party/IronRDP/crates/ironrdp-client", features 
 ironrdp-viewer = { path = "third_party/IronRDP/crates/ironrdp-viewer" }
 ironrdp-pdu = { path = "third_party/IronRDP/crates/ironrdp-pdu" }
 ironrdp-tls = { path = "third_party/IronRDP/crates/ironrdp-tls", features = ["rustls"] }
+# Shared folder (drive redirection)
+ironrdp-rdpdr-native = { path = "third_party/IronRDP/crates/ironrdp-rdpdr-native" }
 
 # SSH jump host
 russh = "0.65"
@@ -42,10 +44,10 @@ rfd = "0.18"
 # Session Dock icon and badge, clipboard bridge (the engine has no macOS clipboard backend)
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSImage", "NSPasteboard", "NSResponder", "NSRunningApplication"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSEvent", "NSImage", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen"] }
 ironrdp-cliprdr = { path = "third_party/IronRDP/crates/ironrdp-cliprdr" }
 ironrdp-core = { path = "third_party/IronRDP/crates/ironrdp-core" }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSGeometry", "NSString"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }

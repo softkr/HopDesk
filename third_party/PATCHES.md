@@ -35,6 +35,9 @@ session at its connection size and scale (the frame is scaled to the window), an
 It also stretches each frame over the client area (macOS otherwise presents it 1:1 in physical
 pixels, at half size on Retina), and `App::with_logical_pixels` maps one session pixel to one
 logical point for the initial window size and for resize requests (at 100% scale).
+`App::with_drop_handler` hands files dropped on the window to the embedder; when it returns a
+`DropPaste`, the viewer clicks the drop position in the session and presses Ctrl+V once the
+session clipboard holds the files.
 On macOS, Command is sent to the session as Control (Mac shortcuts such as ⌘C/⌘V), and ⌘⌥Enter
 toggles fullscreen.
 
