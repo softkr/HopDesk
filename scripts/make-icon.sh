@@ -3,6 +3,7 @@
 #   HopDesk.icns        macOS app bundle
 #   icon-256.png        macOS window/Dock icon (keeps Apple's icon-grid margin)
 #   icon-session-256.png  macOS Dock icon of a session window
+#   icon-tray-44.png    macOS menu bar icon (template image, 22 pt @2x)
 #   HopDesk.ico         Windows exe icon (embedded by build.rs)
 #   icon-full-256.png   Windows/Linux window icon and Linux desktop icon (margin cropped)
 # Needs the `resvg` CLI (cargo install resvg) and macOS `iconutil`.
@@ -32,6 +33,8 @@ iconutil -c icns "$SET" -o HopDesk.icns
 render icon.svg 256 icon-256.png
 # macOS Dock icon of a running session (tells it apart from the launcher)
 render icon-session.svg 256 icon-session-256.png
+# macOS menu bar icon of the launcher (black on transparent; macOS tints it)
+render icon-tray.svg 44 icon-tray-44.png
 
 # Windows / Linux: crop the macOS grid margin so the tile fills the square.
 crop='s/viewBox="0 0 1024 1024"/viewBox="88 88 848 848"/'

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="80 108 812 812">
+<title>HopDesk menu bar icon (template: black on transparent)</title>
+<defs>
+ <mask id="bezel" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+  <rect width="1024" height="1024" fill="#fff"/>
+  <path d="M300 456H560" stroke="#000" stroke-width="120" stroke-linecap="round"/>
+ </mask>
+ <mask id="holes" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+  <rect width="1024" height="1024" fill="#fff"/>
+  <circle cx="316" cy="456" r="22" fill="#000"/>
+  <circle cx="625" cy="456" r="34" fill="#000"/>
+ </mask>
+</defs>
+<g transform="translate(-16 0)">
+ <g mask="url(#bezel)" stroke="#000" stroke-width="70" fill="none" stroke-linecap="round">
+  <rect x="420" y="280" width="410" height="352" rx="58"/>
+  <path d="M625 632V720M520 748H730"/>
+ </g>
+ <g mask="url(#holes)" fill="#000">
+  <path d="M196 456H560" stroke="#000" stroke-width="64" stroke-linecap="round"/>
+  <circle cx="316" cy="456" r="68.0"/>
+  <circle cx="625" cy="456" r="88.0"/>
+ </g>
+ <circle cx="196" cy="456" r="56" fill="#000"/>
+</g>
+</svg>

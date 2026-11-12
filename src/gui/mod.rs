@@ -8,6 +8,8 @@ mod form;
 mod platform;
 mod sessions;
 mod theme;
+#[cfg(any(target_os = "macos", windows))]
+mod tray;
 mod widgets;
 
 #[cfg(test)]
@@ -49,7 +51,14 @@ pub fn run() -> anyhow::Result<()> {
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
-            let launcher = Launcher::new();
+            #[cfg_attr(not(any(target_os = "macos", windows)), expect(unused_mut, reason = "no tray"))]
+            let mut launcher = Launcher::new();
+            #[cfg(any(target_os = "macos", windows))]
+            match tray::Tray::new(&cc.egui_ctx) {
+                Ok(tray) => launcher.tray = Some(tray),
+                // Without the icon, closing the window quits as before.
+                Err(error) => tracing::warn!(error = %format!("{error:#}"), "Tray icon unavailable"),
+            }
             launcher.check_for_update(&cc.egui_ctx);
             Ok(Box::new(launcher))
         }),
@@ -109,6 +118,9 @@ pub struct Launcher {
     toasts: Vec<Toast>,
     sessions: Sessions,
     update: Arc<Mutex<UpdateState>>,
+    /// Menu bar / notification area icon; while present, closing the window hides it.
+    #[cfg(any(target_os = "macos", windows))]
+    tray: Option<tray::Tray>,
 }
 
 impl Launcher {
@@ -138,6 +150,8 @@ impl Launcher {
             toasts: Vec::new(),
             sessions,
             update: Arc::new(Mutex::new(UpdateState::None)),
+            #[cfg(any(target_os = "macos", windows))]
+            tray: None,
         }
     }
 
@@ -699,6 +713,10 @@ impl Launcher {
 
 impl eframe::App for Launcher {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some(tray) = &self.tray {
+            tray.hide_on_close(ui.ctx());
+        }
         self.draw(ui);
     }
 }
