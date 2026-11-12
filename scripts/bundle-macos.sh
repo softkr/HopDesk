@@ -77,8 +77,11 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Ad-hoc signature so Gatekeeper and the Keychain treat the bundle as one app.
-codesign --force --deep --sign - "$APP"
+# HOPDESK_SIGN_IDENTITY names the certificate from scripts/make-signing-cert.sh (in a keychain
+# on the search list). Releases must use it: the Keychain trusts saved passwords to the
+# signing certificate, so updates keep access. Without it the bundle is signed ad hoc, and
+# the Keychain asks again after every rebuild.
+codesign --force --deep --sign "${HOPDESK_SIGN_IDENTITY:--}" "$APP"
 
 echo "built $APP"
 

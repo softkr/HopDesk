@@ -95,8 +95,33 @@ jobs:
             pkg-config cmake libasound2-dev libfontconfig1-dev libxkbcommon-dev \
             libwayland-dev libudev-dev libdrm-dev
 
+      # Every release is signed with the same self-signed certificate
+      # (scripts/make-signing-cert.sh), so users' Keychains keep trusting updates.
+      - name: Import signing certificate (macOS)
+        if: runner.os == 'macOS'
+        env:
+          P12: ${{ secrets.MACOS_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+        run: |
+          if [ -z "$P12" ] || [ -z "$P12_PASSWORD" ]; then
+            echo "::error::MACOS_SIGN_P12 and MACOS_SIGN_P12_PASSWORD secrets are required (scripts/make-signing-cert.sh)"
+            exit 1
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/signing.p12"
+
       - name: Package (macOS)
         if: runner.os == 'macOS'
+        env:
+          HOPDESK_SIGN_IDENTITY: HopDesk Self-Signed
         # One disk image per architecture, so Intel and Apple Silicon downloads are explicit.
         run: |
           scripts/release-macos.sh --target aarch64-apple-darwin
