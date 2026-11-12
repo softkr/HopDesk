@@ -1,21 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
 <title>HopDesk session</title>
-<!-- icon.svg with the colors swapped: gradient monitor on a navy tile. -->
+<!-- icon.svg with the colors swapped: navy mark on a mint-to-blue tile, so sessions stand apart. -->
 <defs>
- <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1E3A66"/><stop offset="1" stop-color="#0E1F3A"/></linearGradient>
- <linearGradient id="gApp" gradientUnits="userSpaceOnUse" x1="92" y1="120" x2="420" y2="386"><stop offset="0" stop-color="#8EF0D2"/><stop offset="1" stop-color="#7FB4E6"/></linearGradient>
+ <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8CF2D8"/><stop offset="1" stop-color="#2E8CEA"/></linearGradient>
  <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#0B1F28" flood-opacity="0.28"/></filter>
 </defs>
 <g filter="url(#sh)">
- <g transform="translate(100 100) scale(1.609375)">
-  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <g fill="url(#gApp)">
-   <path fill-rule="evenodd" d="M110,120 H402 Q420,120 420,138 V318 Q420,336 402,336 H110 Q92,336 92,318 V138 Q92,120 110,120 Z M116,144 V292 H396 V144 Z"/>
-   <path d="M236,334 H276 L284,370 H228 Z"/>
-   <rect x="186" y="364" width="140" height="22" rx="11"/>
-  </g>
-  <rect x="116" y="144" width="280" height="148" fill="#8EF0D2" fill-opacity="0.18"/>
-  <circle cx="256" cy="314" r="8" fill="#13294B"/>
+ <g transform="translate(100 100) scale(0.8046875)">
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <mask id="mAr" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="#fff"/><path d="M268.0,772.7 C328.0,625.7 434.6,582.3 599.6,542.3 L597.7,610.6 L769.7,437.2 L537.3,361.8 L570.4,421.7 C405.4,461.7 232.0,614.3 256.0,771.3 Z" fill="#000" stroke="#000" stroke-width="44" stroke-linejoin="round" stroke-linecap="round"/></mask>
+  <g fill="#072659" mask="url(#mAr)"><path d="M200,250 H286 V764 H200 Z"/><path fill-rule="evenodd" d="M445,250 H565 A257,257 0 0 1 565,764 H445 Z M530,335 V679 H565 A172,172 0 0 0 565,335 Z"/></g>
+  <path d="M268.0,772.7 C328.0,625.7 434.6,582.3 599.6,542.3 L597.7,610.6 L769.7,437.2 L537.3,361.8 L570.4,421.7 C405.4,461.7 232.0,614.3 256.0,771.3 Z" fill="#072659" stroke="#072659" stroke-width="6" stroke-linejoin="round"/>
  </g>
 </g>
 </svg>

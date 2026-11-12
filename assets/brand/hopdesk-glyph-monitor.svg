@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#0D5A93"/><stop offset="0.55" stop-color="#072659"/><stop offset="1" stop-color="#041237"/>
+  </linearGradient>
+  <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#7FD3FF" stop-opacity="0.35"/><stop offset="1" stop-color="#7FD3FF" stop-opacity="0.05"/>
+  </linearGradient>
+  <linearGradient id="gl" gradientUnits="userSpaceOnUse" x1="760" y1="220" x2="300" y2="820">
+    <stop offset="0" stop-color="#78E8D4"/><stop offset="1" stop-color="#2F8DEA"/>
+  </linearGradient>
+  <linearGradient id="gv" gradientUnits="userSpaceOnUse" x1="0" y1="250" x2="0" y2="770">
+    <stop offset="0" stop-color="#76E6D3"/><stop offset="1" stop-color="#2E8CEA"/>
+  </linearGradient>
+  <linearGradient id="ga" gradientUnits="userSpaceOnUse" x1="270" y1="770" x2="860" y2="380">
+    <stop offset="0" stop-color="#2F8DEA"/><stop offset="0.6" stop-color="#5CD3DA"/><stop offset="1" stop-color="#8CF2D8"/>
+  </linearGradient>
+</defs>
+<mask id="mMo" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="#fff"/><path d="M264.0,792.6 C330.3,617.4 477.1,567.9 667.1,519.9 L666.8,592.1 L853.6,400.6 L598.3,320.7 L632.9,384.1 C442.9,432.1 221.7,606.6 252.0,791.4 Z" fill="#000" stroke="#000" stroke-width="44" stroke-linejoin="round" stroke-linecap="round"/></mask><g fill="url(#gl)" mask="url(#mMo)"><path fill-rule="evenodd" d="M176,262 H746 Q772,262 772,288 V650 Q772,676 746,676 H176 Q150,676 150,650 V288 Q150,262 176,262 Z M198,302 H724 Q732,302 732,310 V628 Q732,636 724,636 H198 Q190,636 190,628 V310 Q190,302 198,302 Z"/><path fill-rule="evenodd" d="M416,674 H508 L534,750 H390 Z M451,702 a11,11 0 1 0 22,0 a11,11 0 1 0 -22,0 Z"/><path d="M375.0,746 H549.0 Q567.0,746 567.0,764 Q567.0,782 549.0,782 H375.0 Q357.0,782 357.0,764 Q357.0,746 375.0,746 Z"/></g><path d="M264.0,792.6 C330.3,617.4 477.1,567.9 667.1,519.9 L666.8,592.1 L853.6,400.6 L598.3,320.7 L632.9,384.1 C442.9,432.1 221.7,606.6 252.0,791.4 Z" fill="url(#ga)" stroke="url(#ga)" stroke-width="6" stroke-linejoin="round"/>
+</svg>

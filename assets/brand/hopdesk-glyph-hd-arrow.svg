@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#0D5A93"/><stop offset="0.55" stop-color="#072659"/><stop offset="1" stop-color="#041237"/>
+  </linearGradient>
+  <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#7FD3FF" stop-opacity="0.35"/><stop offset="1" stop-color="#7FD3FF" stop-opacity="0.05"/>
+  </linearGradient>
+  <linearGradient id="gl" gradientUnits="userSpaceOnUse" x1="760" y1="220" x2="300" y2="820">
+    <stop offset="0" stop-color="#78E8D4"/><stop offset="1" stop-color="#2F8DEA"/>
+  </linearGradient>
+  <linearGradient id="gv" gradientUnits="userSpaceOnUse" x1="0" y1="250" x2="0" y2="770">
+    <stop offset="0" stop-color="#76E6D3"/><stop offset="1" stop-color="#2E8CEA"/>
+  </linearGradient>
+  <linearGradient id="ga" gradientUnits="userSpaceOnUse" x1="270" y1="770" x2="860" y2="380">
+    <stop offset="0" stop-color="#2F8DEA"/><stop offset="0.6" stop-color="#5CD3DA"/><stop offset="1" stop-color="#8CF2D8"/>
+  </linearGradient>
+</defs>
+<mask id="mAr" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="#fff"/><path d="M268.0,772.7 C328.0,625.7 434.6,582.3 599.6,542.3 L597.7,610.6 L769.7,437.2 L537.3,361.8 L570.4,421.7 C405.4,461.7 232.0,614.3 256.0,771.3 Z" fill="#000" stroke="#000" stroke-width="44" stroke-linejoin="round" stroke-linecap="round"/></mask><g fill="url(#gv)" mask="url(#mAr)"><path d="M200,250 H286 V764 H200 Z"/><path fill-rule="evenodd" d="M445,250 H565 A257,257 0 0 1 565,764 H445 Z M530,335 V679 H565 A172,172 0 0 0 565,335 Z"/></g><path d="M268.0,772.7 C328.0,625.7 434.6,582.3 599.6,542.3 L597.7,610.6 L769.7,437.2 L537.3,361.8 L570.4,421.7 C405.4,461.7 232.0,614.3 256.0,771.3 Z" fill="url(#ga)" stroke="url(#ga)" stroke-width="6" stroke-linejoin="round"/>
+</svg>
