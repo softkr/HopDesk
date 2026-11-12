@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 200" width="220" height="200">
+<defs>
+  <linearGradient id="gMonL" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#3EB8EE"/><stop offset="1" stop-color="#1A7FDE"/></linearGradient>
+  <linearGradient id="gArrow" gradientUnits="userSpaceOnUse" x1="100" y1="80" x2="320" y2="-60"><stop offset="0" stop-color="#1F8BE3"/><stop offset="0.55" stop-color="#36B9DA"/><stop offset="1" stop-color="#5FE0C6"/></linearGradient>
+  <linearGradient id="gHop" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2398E8"/><stop offset="1" stop-color="#1478D6"/></linearGradient>
+  <linearGradient id="gMonLDark" x1="0" y1="0" x2="0.5" y2="1"><stop offset="0" stop-color="#6FE3CC"/><stop offset="1" stop-color="#3FB7D8"/></linearGradient>
+  <linearGradient id="gArrowDark" gradientUnits="userSpaceOnUse" x1="100" y1="80" x2="320" y2="-60"><stop offset="0" stop-color="#3AA5E6"/><stop offset="1" stop-color="#6FE6CC"/></linearGradient>
+  <linearGradient id="gHopDark" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6FE3CC"/><stop offset="1" stop-color="#4FCFC8"/></linearGradient>
+  <linearGradient id="gHD" x1="0" y1="0" x2="0.9" y2="1"><stop offset="0" stop-color="#5FE0C6"/><stop offset="0.5" stop-color="#2A9EE6"/><stop offset="1" stop-color="#1565D8"/></linearGradient>
+</defs>
+<g transform="translate(10,0)"><mask id="hdCut"><rect x="-10" y="-10" width="240" height="240" fill="#fff"/>
+  <rect x="64" y="78" width="44" height="44" fill="#000"/></mask>
+<g fill="url(#gHD)">
+  <rect x="8" y="22" width="34" height="156" rx="6"/>
+  <path mask="url(#hdCut)" fill-rule="evenodd" d="M70,22 H112 A78,78 0 0 1 112,178 H70 Z M102,54 V146 H112 A46,46 0 0 0 112,54 Z"/>
+  <path d="M42,86 H118 V66 L156,100 L118,134 V114 H42 Z" stroke-linejoin="round"/>
+</g></g>
+</svg>

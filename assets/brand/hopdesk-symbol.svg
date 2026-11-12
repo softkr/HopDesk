@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 335" width="496" height="335">
+<defs>
+  <linearGradient id="gMonL" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#3EB8EE"/><stop offset="1" stop-color="#1A7FDE"/></linearGradient>
+  <linearGradient id="gArrow" gradientUnits="userSpaceOnUse" x1="100" y1="80" x2="320" y2="-60"><stop offset="0" stop-color="#1F8BE3"/><stop offset="0.55" stop-color="#36B9DA"/><stop offset="1" stop-color="#5FE0C6"/></linearGradient>
+  <linearGradient id="gHop" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2398E8"/><stop offset="1" stop-color="#1478D6"/></linearGradient>
+  <linearGradient id="gMonLDark" x1="0" y1="0" x2="0.5" y2="1"><stop offset="0" stop-color="#6FE3CC"/><stop offset="1" stop-color="#3FB7D8"/></linearGradient>
+  <linearGradient id="gArrowDark" gradientUnits="userSpaceOnUse" x1="100" y1="80" x2="320" y2="-60"><stop offset="0" stop-color="#3AA5E6"/><stop offset="1" stop-color="#6FE6CC"/></linearGradient>
+  <linearGradient id="gHopDark" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6FE3CC"/><stop offset="1" stop-color="#4FCFC8"/></linearGradient>
+  <linearGradient id="gHD" x1="0" y1="0" x2="0.9" y2="1"><stop offset="0" stop-color="#5FE0C6"/><stop offset="0.5" stop-color="#2A9EE6"/><stop offset="1" stop-color="#1565D8"/></linearGradient>
+</defs>
+<g transform="translate(30,130)"><g transform="translate(0,0)"><path fill="url(#gMonL)" fill-rule="evenodd" d="M14,0 H186 Q200,0 200,14 V131 Q200,145 186,145 H14 Q0,145 0,131 V14 Q0,0 14,0 Z M18,15 H182 Q185,15 185,18 V108 Q185,111 182,111 H18 Q15,111 15,108 V18 Q15,15 18,15 Z M94.5,128.0 a5.5,5.5 0 1 0 11,0 a5.5,5.5 0 1 0 -11,0 Z"/><path fill="url(#gMonL)" d="M84.0,144 H116.0 L122.0,165 H78.0 Z"/><rect x="52.0" y="161" width="96" height="14" rx="7" fill="url(#gMonL)"/></g><g transform="translate(236,0)"><path fill="#13294B" fill-rule="evenodd" d="M14,0 H186 Q200,0 200,14 V131 Q200,145 186,145 H14 Q0,145 0,131 V14 Q0,0 14,0 Z M18,15 H182 Q185,15 185,18 V108 Q185,111 182,111 H18 Q15,111 15,108 V18 Q15,15 18,15 Z M94.5,128.0 a5.5,5.5 0 1 0 11,0 a5.5,5.5 0 1 0 -11,0 Z"/><path fill="#13294B" d="M84.0,144 H116.0 L122.0,165 H78.0 Z"/><rect x="52.0" y="161" width="96" height="14" rx="7" fill="#13294B"/></g><path d="M100,82 C94,-6 168,-78 282,-50" fill="none" stroke="url(#gArrow)" stroke-width="24" stroke-linecap="round"/><path fill="#5FE0C6" d="M324,-36 L268,-12 Q262,-10 263,-17 L274,-80 Q275,-87 281,-83 Z" stroke="#5FE0C6" stroke-width="6" stroke-linejoin="round"/></g>
+</svg>
