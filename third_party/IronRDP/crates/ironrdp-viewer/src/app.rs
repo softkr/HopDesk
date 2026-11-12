@@ -562,13 +562,14 @@ impl RpcApp {
             return;
         };
 
-        // [PATCH HopDesk] Ctrl+Alt+Enter toggles fullscreen locally instead of reaching the session.
+        // [PATCH HopDesk] Ctrl+Alt+Enter (⌘⌥Enter on macOS) toggles fullscreen locally instead of
+        // reaching the session.
         if let WindowEvent::ModifiersChanged(modifiers) = &event {
             self.modifiers = modifiers.state();
         }
         if let WindowEvent::KeyboardInput { event: key, .. } = &event
             && key.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::Enter)
-            && self.modifiers.control_key()
+            && (self.modifiers.control_key() || (cfg!(target_os = "macos") && self.modifiers.super_key()))
             && self.modifiers.alt_key()
         {
             if key.state.is_pressed() && !key.repeat {
@@ -1194,11 +1195,18 @@ fn forward_input_event(
             // > key being pressed and on some platforms like Wayland/X11 which key resulted
             // > in modifiers change is hidden, also, not that it really matters.
             let state = modifiers.state();
+            // [PATCH HopDesk] macOS: Command acts as Control in the session, so the Mac shortcuts
+            // (⌘C, ⌘V, ⌘X, ⌘A, ⌘Z…) work; the Start menu stays reachable with Ctrl+Esc.
+            let (control, logo) = if cfg!(target_os = "macos") {
+                (state.control_key() || state.super_key(), false)
+            } else {
+                (state.control_key(), state.super_key())
+            };
             let operations = [
                 (state.shift_key(), SHIFT_LEFT),
-                (state.control_key(), CONTROL_LEFT),
+                (control, CONTROL_LEFT),
                 (state.alt_key(), ALT_LEFT),
-                (state.super_key(), LOGO_LEFT),
+                (logo, LOGO_LEFT),
             ]
             .map(|(pressed, scancode)| {
                 if pressed {

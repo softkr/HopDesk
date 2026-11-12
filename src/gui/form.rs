@@ -510,7 +510,8 @@ impl Form {
                             ui.add(text_input(ui, &mut self.height, "세로", 70.0, invalid));
                         }
                         if self.display == DisplayMode::Fullscreen {
-                            ui.label(RichText::new("Ctrl+Alt+Enter로 창 모드 전환").small().color(pal.text_weak));
+                            let shortcut = if cfg!(target_os = "macos") { "⌘⌥Enter" } else { "Ctrl+Alt+Enter" };
+                            ui.label(RichText::new(format!("{shortcut}로 창 모드 전환")).small().color(pal.text_weak));
                         }
                     });
                 });

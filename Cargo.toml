@@ -38,10 +38,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = "0.37"
 rfd = "0.18"
 
-# Session Dock icon and badge
+# Session Dock icon and badge, clipboard bridge (the engine has no macOS clipboard backend)
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSImage", "NSResponder", "NSRunningApplication"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSImage", "NSPasteboard", "NSResponder", "NSRunningApplication"] }
+ironrdp-cliprdr = { path = "third_party/IronRDP/crates/ironrdp-cliprdr" }
+ironrdp-core = { path = "third_party/IronRDP/crates/ironrdp-core" }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString"] }
 
 [target.'cfg(windows)'.dependencies]

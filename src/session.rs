@@ -59,6 +59,12 @@ pub fn run(
     // A resize the server cannot apply in place (e.g. from the logon screen) keeps the session
     // instead of disconnecting and logging on again; the viewer retries after logon.
     let client = RdpClient::new(config, output_event_sender).without_resize_reconnect();
+    // The engine bridges the clipboard itself on Windows and Linux only.
+    #[cfg(target_os = "macos")]
+    let client = {
+        let proxy = ironrdp_viewer::clipboard::ClientClipboardMessageProxy::new(client.input_sender());
+        client.with_cliprdr_backend_factory(Box::new(crate::clipboard::MacClipboardFactory::new(proxy)))
+    };
     let input_event_sender = client.input_sender();
     // Maximized and fullscreen windows connect at the profile resolution; the viewer then asks
     // the server to match the window size in points. A fixed session keeps the profile

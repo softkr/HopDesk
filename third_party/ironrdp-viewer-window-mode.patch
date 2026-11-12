@@ -1,5 +1,5 @@
 diff --git a/crates/ironrdp-viewer/src/app.rs b/crates/ironrdp-viewer/src/app.rs
-index af4083b..09e849d 100644
+index af4083b..e744ee1 100644
 --- a/crates/ironrdp-viewer/src/app.rs
 +++ b/crates/ironrdp-viewer/src/app.rs
 @@ -90,9 +90,59 @@ pub struct RpcApp {
@@ -149,17 +149,18 @@ index af4083b..09e849d 100644
          match event_loop.create_window(window_attributes) {
              Ok(window) => {
                  let window = Arc::new(window);
-@@ -466,7 +562,30 @@ impl RpcApp {
+@@ -466,7 +562,31 @@ impl RpcApp {
              return;
          };
  
-+        // [PATCH HopDesk] Ctrl+Alt+Enter toggles fullscreen locally instead of reaching the session.
++        // [PATCH HopDesk] Ctrl+Alt+Enter (⌘⌥Enter on macOS) toggles fullscreen locally instead of
++        // reaching the session.
 +        if let WindowEvent::ModifiersChanged(modifiers) = &event {
 +            self.modifiers = modifiers.state();
 +        }
 +        if let WindowEvent::KeyboardInput { event: key, .. } = &event
 +            && key.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::Enter)
-+            && self.modifiers.control_key()
++            && (self.modifiers.control_key() || (cfg!(target_os = "macos") && self.modifiers.super_key()))
 +            && self.modifiers.alt_key()
 +        {
 +            if key.state.is_pressed() && !key.repeat {
@@ -180,7 +181,7 @@ index af4083b..09e849d 100644
              WindowEvent::Resized(size) => {
                  self.last_size = Some(size);
                  self.resize_timeout = Some(Instant::now() + Duration::from_secs(1));
-@@ -670,7 +789,17 @@ impl RpcApp {
+@@ -670,7 +790,17 @@ impl RpcApp {
              RdpOutputEvent::MonitorLayoutRejected => {
                  warn!("The server cannot accept the requested monitor layout");
              }
@@ -199,7 +200,7 @@ index af4083b..09e849d 100644
              // The viewer sends absolute pointer events only, so no input depends on these flags.
              RdpOutputEvent::ServerInputFlags(_) => {}
              RdpOutputEvent::RemoteSessionId(session_id) => debug!(session_id, "Remote session ID"),
-@@ -680,6 +809,12 @@ impl RpcApp {
+@@ -680,6 +810,12 @@ impl RpcApp {
              }
              RdpOutputEvent::Image { buffer, width, height } => {
                  trace!(width = ?width, height = ?height, "Received image with size");
@@ -212,7 +213,7 @@ index af4083b..09e849d 100644
                  self.buffer_size = (width.get(), height.get());
                  self.buffer = buffer;
                  if let Some((window, surface)) = self.window.as_mut() {
-@@ -931,6 +1066,25 @@ impl ApplicationHandler<RdpOutputEvent> for App {
+@@ -931,6 +1067,25 @@ impl ApplicationHandler<RdpOutputEvent> for App {
  }
  
  /// Maps a window position onto the remote desktop, which the viewer stretches over the client area.
@@ -238,3 +239,24 @@ index af4083b..09e849d 100644
  fn desktop_position(
      window_size: PhysicalSize<u32>,
      desktop_size: (u16, u16),
+@@ -1040,11 +1195,18 @@ fn forward_input_event(
+             // > key being pressed and on some platforms like Wayland/X11 which key resulted
+             // > in modifiers change is hidden, also, not that it really matters.
+             let state = modifiers.state();
++            // [PATCH HopDesk] macOS: Command acts as Control in the session, so the Mac shortcuts
++            // (⌘C, ⌘V, ⌘X, ⌘A, ⌘Z…) work; the Start menu stays reachable with Ctrl+Esc.
++            let (control, logo) = if cfg!(target_os = "macos") {
++                (state.control_key() || state.super_key(), false)
++            } else {
++                (state.control_key(), state.super_key())
++            };
+             let operations = [
+                 (state.shift_key(), SHIFT_LEFT),
+-                (state.control_key(), CONTROL_LEFT),
++                (control, CONTROL_LEFT),
+                 (state.alt_key(), ALT_LEFT),
+-                (state.super_key(), LOGO_LEFT),
++                (logo, LOGO_LEFT),
+             ]
+             .map(|(pressed, scancode)| {
+                 if pressed {

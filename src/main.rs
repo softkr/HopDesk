@@ -15,6 +15,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(target_os = "macos")]
+mod clipboard;
+#[cfg(target_os = "macos")]
 mod dock;
 mod gui;
 mod profile;
