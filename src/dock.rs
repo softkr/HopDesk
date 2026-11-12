@@ -1,14 +1,11 @@
-//! macOS Dock tile of a session process: its own icon and the profile name as a badge, so
-//! sessions are told apart from the launcher and from each other.
+//! macOS Dock tile of a session process: its own icon and the profile name's first character as a
+//! badge, so sessions are told apart from the launcher and from each other.
 
 use objc2::{AllocAnyThread as _, MainThreadMarker};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage};
 use objc2_foundation::{NSData, NSString};
 
 const SESSION_ICON: &[u8] = include_bytes!("../assets/icon/icon-session-256.png");
-
-/// Longest badge, in characters; the Dock badge grows with its text.
-const BADGE_MAX_CHARS: usize = 10;
 
 /// Sets the session icon and badge. Must run on the main thread after the app has launched.
 pub fn mark_session(profile_name: &str) {
@@ -33,14 +30,9 @@ pub fn leave_dock() {
     NSApplication::sharedApplication(mtm).setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
 }
 
+/// The first character of the profile name; a longer badge covers the icon.
 fn badge(name: &str) -> String {
-    let name = name.trim();
-    if name.chars().count() <= BADGE_MAX_CHARS {
-        return name.to_owned();
-    }
-    let mut short: String = name.chars().take(BADGE_MAX_CHARS - 1).collect();
-    short.push('…');
-    short
+    name.trim().chars().take(1).collect()
 }
 
 #[cfg(test)]
@@ -48,8 +40,9 @@ mod tests {
     use super::badge;
 
     #[test]
-    fn badge_shortens_long_names() {
-        assert_eq!(badge("금융존 개발"), "금융존 개발");
-        assert_eq!(badge("production-db-01"), "productio…");
+    fn badge_shows_the_first_character() {
+        assert_eq!(badge("금융존 개발"), "금");
+        assert_eq!(badge("  production-db-01"), "p");
+        assert_eq!(badge(""), "");
     }
 }
