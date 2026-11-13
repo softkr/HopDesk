@@ -1,7 +1,7 @@
 //! Session processes started from the launcher and their progress.
 
 use std::collections::HashMap;
-use std::io::{BufRead as _, BufReader};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -139,6 +139,7 @@ impl Sessions {
             .context("start session process")?;
         let stderr = child.stderr.take().context("session stderr")?;
         let child = Arc::new(Mutex::new(child));
+        let session_log = session_log_file(name);
 
         self.lock().sessions.insert(
             id,
@@ -154,8 +155,12 @@ impl Sessions {
         let ctx = ctx.clone();
         let name = name.to_owned();
         std::thread::spawn(move || {
+            let mut session_log = session_log;
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
+                if let Some(log) = session_log.as_mut() {
+                    let _ = writeln!(log, "{line}");
+                }
                 this.on_line(id, line);
                 ctx.request_repaint();
             }
@@ -212,6 +217,23 @@ impl Sessions {
             session.state = State::Failed(explain(&detail, &session.log, &session.state));
         }
     }
+}
+
+/// A file the session's log is copied into, one per session, when the debug bundle asks for it
+/// with `HOPDESK_LOG_DIR`. The connection log in the window keeps only the last lines; the file
+/// keeps everything, so a file-transfer problem can be read after the fact.
+fn session_log_file(name: &str) -> Option<std::fs::File> {
+    let dir = std::env::var_os("HOPDESK_LOG_DIR")?;
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' })
+        .collect();
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default();
+    let path = std::path::Path::new(&dir).join(format!("session-{safe}-{secs}.log"));
+    std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
 /// Turns raw error text into a short Korean explanation with a next step.
