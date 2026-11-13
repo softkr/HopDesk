@@ -135,6 +135,11 @@ pub fn apply(ctx: &egui::Context) {
             ]
             .into();
 
+            // Labels are plain UI text, not selectable document text: dragging across the
+            // window must not select words like on a web page. Inputs stay selectable.
+            style.interaction.selectable_labels = false;
+            style.interaction.multi_widget_text_select = false;
+
             let s = &mut style.spacing;
             s.item_spacing = Vec2::new(8.0, 8.0);
             s.button_padding = Vec2::new(14.0, 7.0);
