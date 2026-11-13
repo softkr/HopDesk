@@ -74,6 +74,8 @@ pub const HEADING_SIZE: f32 = 22.0;
 
 pub const RADIUS: u8 = 8;
 pub const CARD_RADIUS: u8 = 12;
+/// Hero controls (large buttons) and floating overlays (toasts): slightly rounder than inputs.
+pub const FLOAT_RADIUS: u8 = 10;
 
 pub fn bold_family() -> FontFamily {
     FontFamily::Name("bold".into())

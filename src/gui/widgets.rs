@@ -4,7 +4,7 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Frame, Margin, Response, RichText, Sense, Stroke, TextEdit, Ui, Vec2,
 };
 
-use super::theme::{Bold as _, CARD_RADIUS, Palette, RADIUS, TITLE_SIZE, bold_family, palette};
+use super::theme::{Bold as _, CARD_RADIUS, FLOAT_RADIUS, Palette, RADIUS, TITLE_SIZE, bold_family, palette};
 
 /// Raised container with a border.
 pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
@@ -57,7 +57,7 @@ pub fn large_primary_button(ui: &mut Ui, text: &str, width: f32) -> Response {
     let button = egui::Button::new(RichText::new(text).size(16.0).bold().color(pal.on_accent))
         .fill(pal.accent)
         .stroke(Stroke::NONE)
-        .corner_radius(CornerRadius::same(RADIUS + 2))
+        .corner_radius(CornerRadius::same(FLOAT_RADIUS))
         .min_size(Vec2::new(width, 44.0));
     hover_feedback(ui.add(button), ui)
 }
@@ -108,11 +108,28 @@ const AVATAR_COLORS: [Color32; 8] = [
     Color32::from_rgb(0x4E, 0x7A, 0x5E),
 ];
 
+/// Same hues, brightened so the discs stay visible on a dark sidebar.
+const AVATAR_COLORS_DARK: [Color32; 8] = [
+    Color32::from_rgb(0x2E, 0x6E, 0x85),
+    Color32::from_rgb(0x2B, 0x82, 0x96),
+    Color32::from_rgb(0x4E, 0x87, 0xAC),
+    Color32::from_rgb(0x70, 0x78, 0xB0),
+    Color32::from_rgb(0x96, 0x73, 0xA3),
+    Color32::from_rgb(0xA8, 0x70, 0x70),
+    Color32::from_rgb(0xAA, 0x85, 0x56),
+    Color32::from_rgb(0x5E, 0x96, 0x76),
+];
+
 /// Circle with the first letter of `name`, colored by a stable hash of the name.
 pub fn paint_avatar(ui: &Ui, center: egui::Pos2, radius: f32, name: &str) {
     // FNV-1a spreads similar names over the palette better than a plain multiply-add.
     let hash = name.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
-    let color = AVATAR_COLORS[(hash >> 16) as usize % AVATAR_COLORS.len()];
+    let colors = if ui.visuals().dark_mode {
+        &AVATAR_COLORS_DARK
+    } else {
+        &AVATAR_COLORS
+    };
+    let color = colors[(hash >> 16) as usize % colors.len()];
     ui.painter().circle_filled(center, radius, color);
     let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
     ui.painter().text(
@@ -129,10 +146,12 @@ pub fn avatar(ui: &mut Ui, size: f32, name: &str) {
     paint_avatar(ui, rect.center(), size / 2.0, name);
 }
 
-/// Pill with a colored dot and text, sized to its content.
+/// Pill with a colored dot and text, sized to its content. The dot carries the color; the text
+/// stays `pal.text` so it passes contrast on the tinted background.
 pub fn status_pill(ui: &mut Ui, color: Color32, text: &str) -> Response {
+    let pal = palette(ui);
     let font = FontId::new(13.0, bold_family());
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, pal.text);
     let (pad_x, pad_y, dot, gap) = (10.0, 5.0, 8.0, 6.0);
     let size = Vec2::new(pad_x * 2.0 + dot + gap + galley.size().x, pad_y * 2.0 + galley.size().y);
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
@@ -140,8 +159,35 @@ pub fn status_pill(ui: &mut Ui, color: Color32, text: &str) -> Response {
     painter.rect_filled(rect, CornerRadius::same(255), color.gamma_multiply(0.14));
     painter.circle_filled(egui::Pos2::new(rect.left() + pad_x + dot / 2.0, rect.center().y), dot / 2.0, color);
     let text_pos = egui::Pos2::new(rect.left() + pad_x + dot + gap, rect.center().y - galley.size().y / 2.0);
-    painter.galley(text_pos, galley, color);
+    painter.galley(text_pos, galley, pal.text);
     response
+}
+
+/// Square quiet button showing a vector icon; fills subtly and darkens the icon on hover.
+pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
+    let pal = palette(ui);
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), pal.subtle);
+        if response.is_pointer_button_down_on() {
+            ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), Color32::from_black_alpha(20));
+        }
+    }
+    let color = if hovered { pal.text } else { pal.text_weak };
+    paint_icon(ui.painter(), icon, rect.center(), size * 0.6, color);
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// Round tinted disc with a centered icon, for empty states and hero illustrations.
+pub fn icon_badge(ui: &mut Ui, icon: Icon, diameter: f32) {
+    let pal = palette(ui);
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(diameter), Sense::hover());
+    ui.painter().circle_filled(rect.center(), diameter / 2.0, pal.accent_soft);
+    paint_icon(ui.painter(), icon, rect.center(), diameter * 0.52, pal.accent);
 }
 
 /// Label above a field, optional error below it.
@@ -252,6 +298,8 @@ pub enum Icon {
     Gateway,
     Monitor,
     Check,
+    Plus,
+    Ellipsis,
 }
 
 pub fn paint_icon(painter: &egui::Painter, icon: Icon, center: egui::Pos2, size: f32, color: Color32) {
@@ -287,10 +335,14 @@ pub fn paint_icon(painter: &egui::Painter, icon: Icon, center: egui::Pos2, size:
         Icon::Check => {
             painter.add(egui::Shape::line(vec![p(-0.30, 0.0), p(-0.08, 0.22), p(0.32, -0.20)], stroke));
         }
+        Icon::Plus => {
+            painter.line_segment([p(-0.34, 0.0), p(0.34, 0.0)], stroke);
+            painter.line_segment([p(0.0, -0.34), p(0.0, 0.34)], stroke);
+        }
+        Icon::Ellipsis => {
+            for x in [-0.26, 0.0, 0.26] {
+                painter.circle_filled(p(x, 0.0), s * 0.10, color);
+            }
+        }
     }
-}
-
-pub fn icon(ui: &mut Ui, icon: Icon, size: f32, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    paint_icon(ui.painter(), icon, rect.center(), size, color);
 }

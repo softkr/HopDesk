@@ -503,8 +503,10 @@ impl Launcher {
         ui.horizontal(|ui| {
             ui.label(RichText::new("HopDesk").size(theme::TITLE_SIZE).bold().color(pal.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let add = egui::Button::new(RichText::new("+").size(18.0)).min_size(Vec2::new(30.0, 30.0));
-                if ui.add(add).on_hover_text(format!("새 연결  {}", platform::shortcut("N"))).clicked() {
+                if widgets::icon_button(ui, widgets::Icon::Plus, 30.0)
+                    .on_hover_text(format!("새 연결  {}", platform::shortcut("N")))
+                    .clicked()
+                {
                     self.navigate(Nav::New);
                 }
             });
@@ -613,8 +615,8 @@ impl Launcher {
         let first_run = self.store.profiles().is_empty();
         ui.add_space((ui.available_height() * 0.28).max(40.0));
         ui.vertical_centered(|ui| {
-            widgets::icon(ui, widgets::Icon::Monitor, 64.0, pal.text_weak);
-            ui.add_space(8.0);
+            widgets::icon_badge(ui, widgets::Icon::Monitor, 72.0);
+            ui.add_space(12.0);
             if first_run {
                 ui.label(RichText::new("첫 연결을 만들어 보세요").size(theme::HEADING_SIZE).bold().color(pal.text));
                 ui.add_space(6.0);
@@ -681,10 +683,11 @@ impl Launcher {
                 } else {
                     widgets::primary_button(ui, confirm)
                 };
-                if button.clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                if button.clicked() {
                     confirmed = true;
                 }
-                if ui.button("취소").clicked() {
+                // Enter is the safe answer, not the dangerous one (Esc and outside clicks too).
+                if ui.button("취소").clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
                     cancelled = true;
                 }
             });
@@ -731,7 +734,7 @@ impl Launcher {
                     let frame = egui::Frame::new()
                         .fill(pal.surface)
                         .stroke(Stroke::new(1.0, pal.border))
-                        .corner_radius(CornerRadius::same(10))
+                        .corner_radius(CornerRadius::same(theme::FLOAT_RADIUS))
                         .shadow(egui::Shadow {
                             offset: [0, 4],
                             blur: 16,

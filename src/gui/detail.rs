@@ -114,7 +114,8 @@ fn header(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, 
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = state.is_some_and(State::is_active);
-            ui.menu_button(RichText::new("···").size(16.0).bold(), |ui| {
+            let menu = widgets::icon_button(ui, widgets::Icon::Ellipsis, 30.0).on_hover_text("더 보기");
+            egui::Popup::menu(&menu).show(|ui| {
                 ui.set_min_width(180.0);
                 if ui.button("호스트 키 초기화...").clicked() {
                     *action = Action::ForgetKeys;
@@ -130,9 +131,7 @@ fn header(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, 
                     *action = Action::Delete;
                     ui.close();
                 }
-            })
-            .response
-            .on_hover_text("더 보기");
+            });
             if ui.button("편집").on_hover_text(super::platform::shortcut("E")).clicked() {
                 *action = Action::Edit;
             }
