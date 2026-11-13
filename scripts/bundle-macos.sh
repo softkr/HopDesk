@@ -80,8 +80,10 @@ EOF
 # HOPDESK_SIGN_IDENTITY names the certificate from scripts/make-signing-cert.sh (in a keychain
 # on the search list). Releases must use it: the Keychain trusts saved passwords to the
 # signing certificate, so updates keep access. Without it the bundle is signed ad hoc, and
-# the Keychain asks again after every rebuild.
-codesign --force --deep --sign "${HOPDESK_SIGN_IDENTITY:--}" "$APP"
+# the Keychain asks again after every rebuild. scripts/use-signing-cert.sh picks the identity
+# up (and prepares the keychain once) when the local certificate exists.
+IDENTITY=$(scripts/use-signing-cert.sh)
+codesign --force --deep --sign "${IDENTITY:--}" "$APP"
 
 echo "built $APP"
 

@@ -46,6 +46,16 @@ openssl pkcs12 -export -name "$NAME" -inkey "$TMP/key.pem" -in "$TMP/cert.pem" \
     -passout "pass:$PASSWORD" -out "$P12"
 printf '%s\n' "$PASSWORD" > "$OUT/hopdesk-signing.password"
 
+# Ready the local keychain right away, so the next build signs with the certificate without
+# further setup (scripts/use-signing-cert.sh does the same on demand).
+security import "$P12" -P "$PASSWORD" -k "$HOME/Library/Keychains/login.keychain-db" \
+    -T /usr/bin/codesign >/dev/null 2>&1 || \
+    echo "warning: could not import the certificate into the login keychain" >&2
+if security add-trusted-cert -r trustRoot -p codeSign \
+    -k "$HOME/Library/Keychains/login.keychain-db" "$TMP/cert.pem" >/dev/null 2>&1; then
+    echo "imported $NAME into the login keychain"
+fi
+
 echo "created $P12"
 echo "Add it to the repository's Actions secrets:"
 echo "  base64 -i '$P12' | gh secret set MACOS_SIGN_P12"
