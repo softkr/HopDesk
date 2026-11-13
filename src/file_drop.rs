@@ -2,7 +2,9 @@
 //!
 //! On macOS they go to the remote clipboard and the viewer pastes them where they were dropped.
 //! Elsewhere, or when the server does not allow file copy through the clipboard, they are copied
-//! into the shared folder (`\\tsclient\HopDesk`).
+//! into the shared folder (`\\tsclient\HopDesk`) as [`StagedCopies`]: the remote can read them
+//! only while this session lives, so they are removed from the folder when it ends. The folder
+//! then holds just what was placed there directly.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +27,10 @@ pub fn handler(
     #[cfg(target_os = "macos")] clipboard: Option<crate::clipboard::ClipboardFiles>,
 ) -> DropHandler {
     let status = Arc::new(TitleStatus::default());
+    // Copies this session makes into the shared folder; dropped with the session window.
+    let staged = shared_folder
+        .clone()
+        .map(|folder| Arc::new(StagedCopies::new(folder)));
     Box::new(move |window, paths| {
         let what = describe(&paths);
 
@@ -47,14 +53,22 @@ pub fn handler(
             status.show(window, format!("파일을 보낼 수 없습니다: {what}"));
             return None;
         };
-        status.show(window, format!("공유 폴더로 복사 중: {what}"));
-        let (window, status, remote_folder) = (Arc::clone(window), Arc::clone(&status), remote_folder.clone());
+        status.show(window, format!("공유 폴더로 복사 중: {what} (세션 종료 시 제거)"));
+        let (window, status, remote_folder, staged) = (
+            Arc::clone(window),
+            Arc::clone(&status),
+            remote_folder.clone(),
+            staged.clone(),
+        );
         std::thread::spawn(move || {
             let failed: Vec<String> = paths
                 .iter()
                 .filter_map(|path| match crate::shared_folder::copy_into(path, &folder) {
                     Ok(destination) => {
                         info!(source = %path.display(), destination = %destination.display(), "Copied dropped file");
+                        if let Some(staged) = &staged {
+                            staged.remember(destination);
+                        }
                         None
                     }
                     Err(error) => {
@@ -64,13 +78,52 @@ pub fn handler(
                 })
                 .collect();
             let text = match failed.first() {
-                None => format!("✓ {what} → {remote_folder}"),
+                None => format!("✓ {what} → {remote_folder} (세션 종료 시 공유 폴더에서 제거)"),
                 Some(error) => format!("복사 실패: {error}"),
             };
             status.show(&window, text);
         });
         None
     })
+}
+
+/// Copies a session made into the shared folder, remembered so [`Drop`] can remove them when the
+/// session ends: the remote reaches `\\tsclient\HopDesk` only through a live session, and the
+/// folder is then left to what was placed there directly. Destinations are unique names, so a
+/// removal never takes a file that was already in the folder.
+struct StagedCopies {
+    folder: PathBuf,
+    copied: Mutex<Vec<PathBuf>>,
+}
+
+impl StagedCopies {
+    fn new(folder: PathBuf) -> Self {
+        Self {
+            folder,
+            copied: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Records a copy to remove at session end.
+    fn remember(&self, path: PathBuf) {
+        self.copied.lock().unwrap_or_else(PoisonError::into_inner).push(path);
+    }
+}
+
+impl Drop for StagedCopies {
+    fn drop(&mut self) {
+        let mut copied = self.copied.lock().unwrap_or_else(PoisonError::into_inner);
+        for path in copied.drain(..) {
+            let removed = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&path).is_ok(),
+                Ok(_) => std::fs::remove_file(&path).is_ok(),
+                Err(_) => false,
+            };
+            if removed {
+                info!(path = %path.display(), folder = %self.folder.display(), "Removed the staged copy; the session ended");
+            }
+        }
+    }
 }
 
 /// "a.txt" or "a.txt 외 2개".
@@ -139,15 +192,38 @@ fn cursor_in_window(window: &Window) -> Option<winit::dpi::PhysicalPosition<f64>
 
 #[cfg(test)]
 mod tests {
-    use super::describe;
-    use std::path::PathBuf;
+    use super::*;
 
     #[test]
     fn drops_are_described_by_first_name_and_count() {
+        use std::path::PathBuf;
         assert_eq!(describe(&[PathBuf::from("/a/report.xlsx")]), "report.xlsx");
         assert_eq!(
             describe(&[PathBuf::from("/a/report.xlsx"), PathBuf::from("/a/b"), PathBuf::from("/c")]),
             "report.xlsx 외 2개"
         );
+    }
+
+    #[test]
+    fn staged_copies_leave_directly_placed_files_alone() {
+        let root = std::env::temp_dir().join(format!("hopdesk-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sent-dir/inner")).expect("create folders");
+        std::fs::write(root.join("sent.txt"), b"a").expect("write file");
+        std::fs::write(root.join("sent-dir/inner/file.txt"), b"b").expect("write nested file");
+        std::fs::write(root.join("manual.txt"), b"keep").expect("write manual file");
+
+        {
+            // What `copy_into` hands back for a dropped file and a dropped folder.
+            let staged = StagedCopies::new(root.clone());
+            staged.remember(root.join("sent.txt"));
+            staged.remember(root.join("sent-dir"));
+        } // the session ends here
+
+        assert!(!root.join("sent.txt").exists(), "the staged file is removed");
+        assert!(!root.join("sent-dir").exists(), "the staged folder is removed");
+        assert_eq!(std::fs::read(root.join("manual.txt")).expect("read manual"), b"keep");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

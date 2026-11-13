@@ -20,6 +20,8 @@ mod clipboard;
 mod dock;
 #[cfg(any(target_os = "macos", test))]
 mod file_offer;
+#[cfg(any(target_os = "macos", test))]
+mod file_pull;
 mod file_drop;
 mod gui;
 mod profile;
