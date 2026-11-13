@@ -136,12 +136,16 @@ impl Profile {
 pub struct ProfileStore {
     #[serde(default, rename = "profile")]
     profiles: Vec<Profile>,
+    /// Where the shared folder lives, when set somewhere other than the default under the
+    /// home directory. Received files land here and the session shares it as a drive.
+    #[serde(default)]
+    shared_folder: Option<PathBuf>,
 }
 
 impl ProfileStore {
     #[cfg(test)]
     pub fn from_profiles(profiles: Vec<Profile>) -> Self {
-        Self { profiles }
+        Self { profiles, shared_folder: None }
     }
 
     fn path() -> anyhow::Result<PathBuf> {
@@ -161,6 +165,17 @@ impl ProfileStore {
         let path = Self::path()?;
         let text = toml::to_string_pretty(self)?;
         crate::write_private_file(&path, text.as_bytes())
+    }
+
+    /// The configured shared folder location, if the user picked one.
+    pub fn shared_folder(&self) -> Option<&std::path::Path> {
+        self.shared_folder.as_deref()
+    }
+
+    /// Sets (or, with `None`, clears) the shared folder location and saves the store.
+    pub fn set_shared_folder(&mut self, folder: Option<PathBuf>) -> anyhow::Result<()> {
+        self.shared_folder = folder;
+        self.save()
     }
 
     /// Moves the profiles' secrets stored by earlier versions to where this version keeps them.

@@ -15,10 +15,35 @@ const FOLDER_NAME: &str = "HopDesk 공유";
 /// RDPDR device ID of the shared drive; 0 is reserved.
 const DEVICE_ID: u32 = 1;
 
-/// The shared folder, created when missing.
+/// The shared folder, created when missing. The location set in the profile store wins over
+/// the default under the home directory.
 pub fn path() -> anyhow::Result<PathBuf> {
+    let configured = crate::profile::ProfileStore::load()
+        .ok()
+        .and_then(|store| store.shared_folder().map(Path::to_path_buf));
+    match configured {
+        Some(dir) => {
+            std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+            Ok(dir)
+        }
+        None => default_path(),
+    }
+}
+
+/// The default location: directly under the home directory, not under Documents/Desktop/
+/// Downloads, which macOS guards with a privacy prompt.
+pub fn default_path() -> anyhow::Result<PathBuf> {
     let home = directories::UserDirs::new().context("no home directory")?;
     let dir = home.home_dir().join(FOLDER_NAME);
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Where files received from the remote clipboard wait to be pasted. Deliberately outside the
+/// shared folder, so that folder holds only what was put there directly: the latest received
+/// copy stays pasteable here until the next one replaces it.
+pub fn received_dir() -> anyhow::Result<PathBuf> {
+    let dir = crate::config_dir()?.join("received");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     Ok(dir)
 }
@@ -34,7 +59,7 @@ pub fn copy_into(source: &Path, folder: &Path) -> std::io::Result<PathBuf> {
     Ok(destination)
 }
 
-fn unique_destination(folder: &Path, name: &Path) -> PathBuf {
+pub(crate) fn unique_destination(folder: &Path, name: &Path) -> PathBuf {
     let candidate = folder.join(name);
     if !candidate.exists() {
         return candidate;

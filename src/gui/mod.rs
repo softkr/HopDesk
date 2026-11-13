@@ -574,16 +574,37 @@ impl Launcher {
                 };
                 let state = self.sessions.state(profile.id);
                 let log = self.sessions.log(profile.id);
-                match detail::ui(ui, &profile, state.as_ref(), &log) {
+                let shared_folder = self
+                    .store
+                    .shared_folder()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| crate::shared_folder::default_path().unwrap_or_default());
+                match detail::ui(ui, &profile, state.as_ref(), &log, &shared_folder) {
                     detail::Action::Connect => self.connect(&ctx, profile.id),
                     detail::Action::Cancel => self.sessions.cancel(profile.id),
                     detail::Action::Dismiss => self.sessions.dismiss(profile.id),
                     detail::Action::Edit => self.navigate(Nav::Edit(profile.id)),
                     detail::Action::Delete => self.dialog = Some(Dialog::Delete(profile.id)),
                     detail::Action::ForgetKeys => self.dialog = Some(Dialog::ForgetKeys(profile.id)),
+                    detail::Action::OpenSharedFolder => reveal_in_file_manager(&shared_folder),
+                    detail::Action::PickSharedFolder => self.pick_shared_folder(&ctx),
                     detail::Action::None => {}
                 }
             }
+        }
+    }
+
+    /// Asks where the shared folder should live and remembers the choice. Picking nothing
+    /// keeps the current location; the reset path (back to the default) is clearing the file.
+    fn pick_shared_folder(&mut self, ctx: &egui::Context) {
+        let Some(dir) = rfd::FileDialog::new().set_title("공유 폴더 위치 선택").pick_folder() else {
+            return;
+        };
+        let display = dir.display().to_string();
+        if let Err(error) = self.store.set_shared_folder(Some(dir)) {
+            self.toast(ctx, ToastKind::Error, format!("공유 폴더 위치를 저장하지 못했습니다: {error}"));
+        } else {
+            self.toast(ctx, ToastKind::Info, format!("공유 폴더 위치를 {display}(으)로 바꿨습니다"));
         }
     }
 
@@ -748,6 +769,19 @@ impl eframe::App for Launcher {
             tray.hide_on_close(ui.ctx());
         }
         self.draw(ui);
+    }
+}
+
+/// Opens `path` in the platform file manager, so the shared folder is one click away.
+fn reveal_in_file_manager(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+    if let Err(error) = std::process::Command::new(program).arg(path).spawn() {
+        tracing::warn!(%error, path = %path.display(), "Unable to open the file manager");
     }
 }
 

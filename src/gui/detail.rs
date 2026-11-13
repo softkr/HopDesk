@@ -15,9 +15,17 @@ pub enum Action {
     Edit,
     Delete,
     ForgetKeys,
+    OpenSharedFolder,
+    PickSharedFolder,
 }
 
-pub fn ui(ui: &mut Ui, profile: &Profile, state: Option<&State>, log: &[String]) -> Action {
+pub fn ui(
+    ui: &mut Ui,
+    profile: &Profile,
+    state: Option<&State>,
+    log: &[String],
+    shared_folder: &std::path::Path,
+) -> Action {
     let pal = palette(ui);
     let mut action = Action::None;
 
@@ -55,12 +63,17 @@ pub fn ui(ui: &mut Ui, profile: &Profile, state: Option<&State>, log: &[String])
                     mode => mode.label().to_owned(),
                 };
                 widgets::info_row(ui, &pal, "해상도", &resolution);
-                widgets::info_row(
-                    ui,
-                    &pal,
-                    "공유 폴더",
-                    &format!(r"~/HopDesk 공유 → 원격 \\tsclient\{}", crate::shared_folder::DRIVE_NAME),
-                );
+                ui.label("공유 폴더");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tilde(shared_folder)).color(pal.text_weak));
+                    if ui.small_button("열기").clicked() {
+                        action = Action::OpenSharedFolder;
+                    }
+                    if ui.small_button("변경…").clicked() {
+                        action = Action::PickSharedFolder;
+                    }
+                });
+                ui.end_row();
             });
         });
 
