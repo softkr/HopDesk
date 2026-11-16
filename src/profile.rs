@@ -1,4 +1,4 @@
-//! Connection profiles (jump host + RDP target) and their secrets.
+//! Connection profiles (jump host + remote target) and their secrets.
 //!
 //! Non-secret settings live in `profiles.toml` under the per-user config directory.
 //! Passwords never touch that file: they are stored in the OS credential store
@@ -17,18 +17,31 @@ use crate::secret_store;
 pub struct Profile {
     pub id: Uuid,
     pub name: String,
-    /// Connect through the SSH jump host; otherwise straight to the RDP target.
+    /// Remote control protocol spoken to the target.
+    #[serde(default)]
+    pub protocol: Protocol,
+    /// Connect through the SSH jump host; otherwise straight to the target.
     /// The jump host settings are kept while disabled.
     #[serde(default = "default_use_jump")]
     pub use_jump: bool,
     pub jump: JumpHost,
-    pub target: RdpTarget,
+    pub target: Target,
     #[serde(default = "default_width")]
     pub width: u16,
     #[serde(default = "default_height")]
     pub height: u16,
     #[serde(default)]
     pub display: DisplayMode,
+}
+
+/// Remote control protocol of a profile. Profiles saved before this field existed are RDP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    #[default]
+    Rdp,
+    Ssh,
+    Vnc,
 }
 
 /// How the session window starts.
@@ -64,11 +77,12 @@ pub struct JumpHost {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RdpTarget {
-    /// Host name as seen from the jump host. Also used as the TLS / CredSSP server name.
+pub struct Target {
+    /// Host name as seen from the jump host. RDP also uses it as the TLS / CredSSP server name.
     pub host: String,
     pub port: u16,
     pub user: String,
+    /// Windows domain (RDP only).
     pub domain: Option<String>,
 }
 
@@ -101,15 +115,16 @@ fn default_height() -> u16 {
 pub enum Secret {
     /// Jump host password, or private key passphrase when `key_path` is set.
     Jump,
-    /// RDP (Windows) password.
-    Rdp,
+    /// Password on the target (Windows account for RDP).
+    Target,
 }
 
 impl Secret {
     fn account(self, id: Uuid) -> String {
         match self {
             Secret::Jump => format!("{id}:jump"),
-            Secret::Rdp => format!("{id}:rdp"),
+            // Named before other protocols existed; kept so stored passwords stay where they are.
+            Secret::Target => format!("{id}:rdp"),
         }
     }
 }
@@ -128,7 +143,7 @@ impl Profile {
     }
 
     fn secret_accounts(&self) -> Vec<String> {
-        [Secret::Jump, Secret::Rdp].map(|which| which.account(self.id)).into()
+        [Secret::Jump, Secret::Target].map(|which| which.account(self.id)).into()
     }
 }
 
@@ -242,6 +257,29 @@ mod tests {
     fn profile_without_display_opens_fullscreen() {
         let store: ProfileStore = toml::from_str(PROFILE).expect("parse");
         assert_eq!(store.profiles()[0].display, DisplayMode::Fullscreen);
+    }
+
+    #[test]
+    fn profile_without_protocol_is_rdp() {
+        let store: ProfileStore = toml::from_str(PROFILE).expect("parse");
+        assert_eq!(store.profiles()[0].protocol, Protocol::Rdp);
+    }
+
+    #[test]
+    fn protocol_round_trips_as_lowercase() {
+        let mut store: ProfileStore = toml::from_str(PROFILE).expect("parse");
+        store.profiles[0].protocol = Protocol::Vnc;
+        let text = toml::to_string_pretty(&store).expect("serialize");
+        assert!(text.contains("protocol = \"vnc\""), "{text}");
+        let store: ProfileStore = toml::from_str(&text).expect("parse");
+        assert_eq!(store.profiles()[0].protocol, Protocol::Vnc);
+    }
+
+    #[test]
+    fn target_secret_keeps_the_account_name_of_earlier_versions() {
+        let id = Uuid::nil();
+        assert_eq!(Secret::Target.account(id), format!("{id}:rdp"));
+        assert_eq!(Secret::Jump.account(id), format!("{id}:jump"));
     }
 
     #[test]

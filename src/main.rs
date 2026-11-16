@@ -41,7 +41,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, bail};
 use clap::{Args, Parser, Subcommand};
 
-use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, RdpTarget, Secret};
+use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, Protocol, Secret, Target};
 use crate::trust::TrustStore;
 use crate::tunnel::{JumpParams, Tunnel};
 
@@ -128,7 +128,7 @@ fn main() -> anyhow::Result<()> {
         Command::List => list(),
         Command::Remove { name } => remove(&name),
         Command::SetPassword { name, jump, .. } => {
-            set_password(&name, if jump { Secret::Jump } else { Secret::Rdp })
+            set_password(&name, if jump { Secret::Jump } else { Secret::Target })
         }
         Command::Connect { name, screen } => connect(&name, screen).inspect_err(|e| status::emit(status::Phase::Failed, &format!("{e:#}"))),
         Command::Forget { host } => {
@@ -158,9 +158,10 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
     let profile = Profile {
         id: uuid::Uuid::new_v4(),
         name: args.name,
+        protocol: Protocol::Rdp,
         use_jump: args.jump.is_some(),
         jump,
-        target: RdpTarget {
+        target: Target {
             host: target_host,
             port: target_port,
             user: args.user,
@@ -175,7 +176,7 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
     if profile.use_jump {
         prompt_and_store(&profile, Secret::Jump)?;
     }
-    prompt_and_store(&profile, Secret::Rdp)?;
+    prompt_and_store(&profile, Secret::Target)?;
     store.save()?;
     println!("added profile `{}`", profile.name);
     Ok(())
@@ -226,8 +227,8 @@ fn connect(name: &str, screen: Option<(u16, u16)>) -> anyhow::Result<()> {
     let profile = store.get(name)?.clone();
     let trust = Arc::new(TrustStore::load()?);
 
-    let rdp_password = profile
-        .secret(Secret::Rdp)?
+    let password = profile
+        .secret(Secret::Target)?
         .context("no stored RDP password (use `set-password --rdp`)")?;
 
     let tunnel = if profile.use_jump {
@@ -246,14 +247,14 @@ fn connect(name: &str, screen: Option<(u16, u16)>) -> anyhow::Result<()> {
         None
     };
 
-    session::run(&profile, screen, rdp_password, tunnel, trust)
+    session::run(&profile, screen, password, tunnel, trust)
 }
 
 fn prompt_and_store(profile: &Profile, which: Secret) -> anyhow::Result<()> {
     let prompt = match (which, profile.jump.key_path.is_some()) {
         (Secret::Jump, false) => format!("Jump host password for {}@{}: ", profile.jump.user, profile.jump.host),
         (Secret::Jump, true) => "Private key passphrase (empty if none): ".to_owned(),
-        (Secret::Rdp, _) => format!("RDP password for {}@{}: ", profile.target.user, profile.target.host),
+        (Secret::Target, _) => format!("RDP password for {}@{}: ", profile.target.user, profile.target.host),
     };
     let value = rpassword::prompt_password(prompt)?;
     if value.is_empty() && !(which == Secret::Jump && profile.jump.key_path.is_some()) {

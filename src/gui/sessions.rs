@@ -18,7 +18,7 @@ pub enum State {
     /// Process started, nothing reported yet.
     Starting,
     Ssh,
-    Rdp,
+    Remote,
     Connected,
     Reconnecting,
     Failed(FailureInfo),
@@ -178,7 +178,7 @@ impl Sessions {
             Some((phase, detail)) => {
                 let next = match phase {
                     Phase::Ssh => Some(State::Ssh),
-                    Phase::Rdp => Some(State::Rdp),
+                    Phase::Remote => Some(State::Remote),
                     Phase::Connected | Phase::LoggedIn => Some(State::Connected),
                     Phase::Reconnecting => Some(State::Reconnecting),
                     Phase::Failed => Some(State::Failed(explain(&detail, &session.log, &session.state))),
@@ -318,6 +318,6 @@ fn explain(detail: &str, log: &[String], state: &State) -> FailureInfo {
                 && !has("direct-tcpip")
                 && !has("TCP connect")
                 && (has("logon") || has("credssp") || has("authentication") || has("password"))),
-        at_remote: matches!(state, State::Rdp | State::Connected | State::Reconnecting) && !has("SSH HOST KEY CHANGED"),
+        at_remote: matches!(state, State::Remote | State::Connected | State::Reconnecting) && !has("SSH HOST KEY CHANGED"),
     }
 }

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::theme::{Bold as _, palette};
 use super::widgets::{self, card, field, section_title, text_input};
-use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, RdpTarget, Secret};
+use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, Protocol, Secret, Target};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Field {
@@ -77,6 +77,8 @@ pub struct Form {
     jump_secret: String,
     /// Existing profile: the stored secret is kept unless the user chooses to change it.
     change_jump_secret: bool,
+    /// Kept as stored; the form edits RDP settings only so far.
+    protocol: Protocol,
     target_host: String,
     target_port: String,
     rdp_user: String,
@@ -115,6 +117,7 @@ impl Form {
             key_path: String::new(),
             jump_secret: String::new(),
             change_jump_secret: true,
+            protocol: Protocol::Rdp,
             target_host: String::new(),
             target_port: "3389".into(),
             rdp_user: String::new(),
@@ -146,6 +149,7 @@ impl Form {
             key_path: p.jump.key_path.as_ref().map(|k| display_path(k)).unwrap_or_default(),
             jump_secret: String::new(),
             change_jump_secret: false,
+            protocol: p.protocol,
             target_host: p.target.host.clone(),
             target_port: p.target.port.to_string(),
             rdp_user: p.target.user.clone(),
@@ -266,6 +270,7 @@ impl Form {
         Ok(Profile {
             id: self.id.unwrap_or_else(Uuid::new_v4),
             name,
+            protocol: self.protocol,
             use_jump: self.use_jump,
             jump: JumpHost {
                 host: jump_host,
@@ -273,7 +278,7 @@ impl Form {
                 user: jump_user,
                 key_path: key_path.map(|k| expand_tilde(&k)),
             },
-            target: RdpTarget {
+            target: Target {
                 host: target_host,
                 port: target_port,
                 user: rdp_user,
@@ -295,7 +300,7 @@ impl Form {
             profile.set_secret(Secret::Jump, &self.jump_secret)?;
         }
         if write_rdp {
-            profile.set_secret(Secret::Rdp, &self.rdp_password)?;
+            profile.set_secret(Secret::Target, &self.rdp_password)?;
         }
         store.save()
     }

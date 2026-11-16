@@ -127,7 +127,7 @@ scripts/make-icon.sh         # assets/icon/*.svg 로 아이콘 파일 생성 (re
 |---|---|
 | `src/main.rs` | 명령줄 인터페이스 |
 | `src/tunnel.rs` | SSH 점프 호스트 터널 |
-| `src/session.rs` | RDP 세션 |
+| `src/session.rs`, `src/session/` | 원격 세션 (프로토콜별 모듈, RDP: `rdp.rs`) |
 | `src/trust.rs` | 호스트 키·인증서 검증 |
 | `src/profile.rs` | 연결 설정과 키체인 |
 | `src/gui/` | 런처 GUI (egui) |

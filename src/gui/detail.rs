@@ -152,7 +152,7 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     let (mut nodes, mut links) = match state {
         None => ([Idle, Idle, Idle], [Idle, Idle]),
         Some(State::Starting | State::Ssh) => ([Done, Active, Idle], [Active, Idle]),
-        Some(State::Rdp) => ([Done, Done, Active], [Done, Active]),
+        Some(State::Remote) => ([Done, Done, Active], [Done, Active]),
         Some(State::Connected) => ([Done, Done, Done], [Done, Done]),
         Some(State::Reconnecting) => ([Done, Done, Active], [Done, Active]),
         Some(State::Failed(f)) if f.at_remote => ([Done, Done, Error], [Done, Error]),
@@ -301,7 +301,7 @@ fn status_area(ui: &mut Ui, pal: &Palette, state: Option<&State>, action: &mut A
             }
             _ => {
                 let text = match state {
-                    Some(State::Rdp) => "원격 PC에 로그인하는 중...",
+                    Some(State::Remote) => "원격 PC에 로그인하는 중...",
                     Some(State::Reconnecting) => "연결이 끊겨 다시 연결하는 중...",
                     _ => "점프 호스트에 연결하는 중...",
                 };
