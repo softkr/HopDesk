@@ -158,6 +158,18 @@ fn screenshots() {
     h.state_mut().apply_nav(Nav::Edit(ssh_id));
     shot(&mut h, "13-ssh-edit-dark");
 
+    // VNC without the jump host: detail with the unencrypted warning, then its edit form
+    let mut vnc = profile("디자인 Mac", "", "mac.example.com", "", false);
+    vnc.protocol = Protocol::Vnc;
+    vnc.use_jump = false;
+    vnc.target.port = 5900;
+    vnc.target.domain = None;
+    let vnc_id = vnc.id;
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![vnc]), Sessions::default()), false);
+    shot(&mut h, "14-vnc-direct");
+    h.state_mut().apply_nav(Nav::Edit(vnc_id));
+    shot(&mut h, "15-vnc-direct-edit");
+
     // 10. Update offered in the sidebar
     let h_launcher = Launcher::with_store(ProfileStore::from_profiles(sample()), Sessions::default());
     h_launcher.set_update_state(super::UpdateState::Available(crate::update::Release::for_test("0.1.4")));

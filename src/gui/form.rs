@@ -89,6 +89,8 @@ pub struct Form {
     /// SSH only: how to log on to the target.
     target_auth: Auth,
     stored_target_auth: Option<Auth>,
+    /// VNC: whether the stored profile logs on with a macOS account (else the VNC password).
+    stored_vnc_account: Option<bool>,
     target_key_path: String,
     /// Password on the target, or the key passphrase.
     target_secret: String,
@@ -132,6 +134,7 @@ impl Form {
             domain: String::new(),
             target_auth: Auth::Password,
             stored_target_auth: None,
+            stored_vnc_account: None,
             target_key_path: String::new(),
             target_secret: String::new(),
             change_target_secret: true,
@@ -168,6 +171,7 @@ impl Form {
             domain: p.target.domain.clone().unwrap_or_default(),
             target_auth,
             stored_target_auth: Some(target_auth),
+            stored_vnc_account: (p.protocol == Protocol::Vnc).then_some(!p.target.user.is_empty()),
             target_key_path: p.target.key_path.as_ref().map(|k| display_path(k)).unwrap_or_default(),
             target_secret: String::new(),
             change_target_secret: false,
@@ -211,9 +215,17 @@ impl Form {
         self.stored_target_auth.is_some_and(|a| a != self.target_auth)
     }
 
-    /// The target secret must be (re-)entered: new profile, or an SSH target with another auth method.
+    /// VNC logs on with a macOS account when a user name is given, else with the VNC password.
+    fn vnc_account(&self) -> bool {
+        self.protocol == Protocol::Vnc && !self.target_user.trim().is_empty()
+    }
+
+    /// The target secret must be (re-)entered: new profile, an SSH target with another auth
+    /// method, or a VNC target switched between VNC password and macOS account.
     fn target_secret_required(&self) -> bool {
-        self.is_new() || (self.protocol == Protocol::Ssh && self.target_auth_switched())
+        self.is_new()
+            || (self.protocol == Protocol::Ssh && self.target_auth_switched())
+            || self.stored_vnc_account.is_some_and(|account| account != self.vnc_account())
     }
 
     /// SSH targets log on with a key when chosen; RDP always uses the Windows password.
@@ -265,10 +277,18 @@ impl Form {
             Protocol::Rdp => "Windows 사용자 이름을 입력하세요",
             _ => "사용자 이름을 입력하세요",
         };
-        let target_user = required(Field::TargetUser, &self.target_user, user_message);
+        let target_user = if self.protocol == Protocol::Vnc {
+            self.target_user.trim().to_owned()
+        } else {
+            required(Field::TargetUser, &self.target_user, user_message)
+        };
         let target_key_path = self
             .target_uses_key()
             .then(|| required(Field::TargetKeyPath, &self.target_key_path, "개인 키 파일을 선택하세요"));
+        // The macOS account password would cross the network unprotected.
+        if self.vnc_account() && !self.use_jump {
+            errors.insert(Field::TargetUser, "macOS 계정 로그인은 점프 호스트를 거칠 때만 쓸 수 있습니다".into());
+        }
 
         if !name.is_empty()
             && store
@@ -305,9 +325,9 @@ impl Form {
         if needs_jump_secret && self.jump_secret.is_empty() {
             errors.insert(Field::JumpSecret, "비밀번호를 입력하세요".into());
         }
-        // A key passphrase may be empty.
-        let needs_target_secret =
-            !self.target_uses_key() && (self.target_secret_required() || self.change_target_secret);
+        // A key passphrase may be empty, and a VNC server may ask for no password.
+        let optional = self.target_uses_key() || (self.protocol == Protocol::Vnc && !self.vnc_account());
+        let needs_target_secret = !optional && (self.target_secret_required() || self.change_target_secret);
         if needs_target_secret && self.target_secret.is_empty() {
             errors.insert(Field::TargetSecret, "비밀번호를 입력하세요".into());
         }
@@ -420,7 +440,11 @@ impl Form {
                 field(ui, "종류", None, |ui| {
                     if self.is_new() {
                         let mut protocol = self.protocol;
-                        let options = [(Protocol::Rdp, "원격 데스크톱 (RDP)"), (Protocol::Ssh, "터미널 (SSH)")];
+                        let options = [
+                            (Protocol::Rdp, protocol_label(Protocol::Rdp)),
+                            (Protocol::Ssh, protocol_label(Protocol::Ssh)),
+                            (Protocol::Vnc, protocol_label(Protocol::Vnc)),
+                        ];
                         if widgets::segmented(ui, &mut protocol, &options) {
                             self.set_protocol(protocol);
                         }
@@ -495,12 +519,13 @@ impl Form {
             card(ui, |ui| {
                 let title = match self.protocol {
                     Protocol::Rdp => "원격 PC (RDP)",
-                    _ => "원격 서버 (SSH)",
+                    Protocol::Ssh => "원격 서버 (SSH)",
+                    Protocol::Vnc => "원격 PC (VNC)",
                 };
                 let noun = super::target_noun(self.protocol);
                 let example = match self.protocol {
-                    Protocol::Rdp => "pc.example.com",
-                    _ => "server.example.com",
+                    Protocol::Ssh => "server.example.com",
+                    _ => "pc.example.com",
                 };
                 let description = if self.use_jump {
                     format!("{noun} 주소는 점프 호스트에서 접근하는 기준으로 입력하세요. 예: 10.0.0.5")
@@ -534,6 +559,10 @@ impl Form {
                         force,
                         err(Field::TargetSecret),
                     );
+                    return;
+                }
+                if self.protocol == Protocol::Vnc {
+                    self.vnc_fields(ui, full, &errors);
                     return;
                 }
 
@@ -645,11 +674,49 @@ impl Form {
     }
 }
 
+impl Form {
+    /// VNC target: an optional macOS account, the password, and a warning without the jump host.
+    fn vnc_fields(&mut self, ui: &mut Ui, full: f32, errors: &Errors) {
+        let pal = palette(ui);
+        let err = |f: Field| errors.get(&f).map(String::as_str);
+        if !self.use_jump {
+            widgets::banner(ui, pal.danger_soft, pal.danger.gamma_multiply(0.4), |ui| {
+                ui.label(RichText::new("암호화되지 않은 연결").bold().color(pal.danger));
+                ui.label(
+                    RichText::new(
+                        "점프 호스트 없이 접속하면 화면과 키 입력이 네트워크에 그대로 보입니다. \
+                         신뢰할 수 있는 네트워크에서만 쓰세요.",
+                    )
+                    .color(pal.text),
+                );
+            });
+        }
+        let edit = text_input(ui, &mut self.target_user, "비워 두면 VNC 비밀번호로 접속", full, err(Field::TargetUser).is_some());
+        field(ui, "macOS 계정 (선택)", err(Field::TargetUser), |ui| ui.add(edit));
+        let (label, hint) = if self.vnc_account() {
+            ("macOS 비밀번호", "")
+        } else {
+            ("VNC 비밀번호", "최대 8자. 비밀번호가 없는 서버면 비워 두세요")
+        };
+        let force = self.target_secret_required();
+        secret_field(
+            ui,
+            full,
+            label,
+            hint,
+            &mut self.target_secret,
+            &mut self.change_target_secret,
+            force,
+            err(Field::TargetSecret),
+        );
+    }
+}
+
 fn protocol_label(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::Rdp => "원격 데스크톱 (RDP)",
         Protocol::Ssh => "터미널 (SSH)",
-        Protocol::Vnc => "원격 데스크톱 (VNC)",
+        Protocol::Vnc => "화면 공유 (VNC)",
     }
 }
 
@@ -797,6 +864,40 @@ mod tests {
         let profile = form.validate(&ProfileStore::default()).expect("valid");
         assert_eq!(profile.target.key_path, None);
         assert_eq!(profile.target.domain, None, "a domain is RDP only");
+    }
+
+    #[test]
+    fn a_macos_account_needs_the_jump_host() {
+        let mut form = ssh_form();
+        form.set_protocol(Protocol::Vnc);
+        assert_eq!(form.target_port, "5900");
+        form.target_user = String::new();
+        let profile = form.validate(&ProfileStore::default()).expect("a VNC password may be empty");
+        assert_eq!(profile.target.user, "");
+
+        form.target_user = "hong".into();
+        let errors = form.validate(&ProfileStore::default()).unwrap_err();
+        assert!(errors.contains_key(&Field::TargetUser), "direct ARD is refused");
+        assert!(errors.contains_key(&Field::TargetSecret), "the macOS password is required");
+
+        form.use_jump = true;
+        form.jump_host = "bastion".into();
+        form.jump_user = "me".into();
+        form.jump_secret = "jump".into();
+        form.target_secret = "mac".into();
+        assert!(form.validate(&ProfileStore::default()).is_ok());
+    }
+
+    #[test]
+    fn switching_between_vnc_password_and_account_asks_again() {
+        let mut form = ssh_form();
+        form.set_protocol(Protocol::Vnc);
+        form.target_user = String::new();
+        let profile = form.validate(&ProfileStore::default()).expect("valid");
+        let mut edit = Form::from_profile(&profile);
+        assert!(!edit.target_secret_required());
+        edit.target_user = "hong".into();
+        assert!(edit.target_secret_required(), "a VNC password is no macOS password");
     }
 
     #[test]

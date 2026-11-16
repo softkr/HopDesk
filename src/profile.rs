@@ -41,7 +41,6 @@ pub enum Protocol {
     #[default]
     Rdp,
     Ssh,
-    #[value(skip)]
     Vnc,
 }
 
@@ -92,6 +91,7 @@ pub struct Target {
     /// Host name as seen from the jump host. RDP also uses it as the TLS / CredSSP server name.
     pub host: String,
     pub port: u16,
+    /// For VNC, empty means the VNC password; a name means that macOS account.
     pub user: String,
     /// Windows domain (RDP only).
     pub domain: Option<String>,

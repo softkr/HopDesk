@@ -247,8 +247,12 @@ fn explain(detail: &str, log: &[String], state: &State, protocol: Protocol) -> F
 
     let target = super::target_noun(protocol);
     let (service, account) = match protocol {
+        Protocol::Rdp => ("원격 데스크톱이", "Windows 사용자 이름, 도메인, 비밀번호를 확인하세요."),
         Protocol::Ssh => ("SSH 서버가", "사용자 이름과 비밀번호(또는 개인 키)를 확인하세요."),
-        _ => ("원격 데스크톱이", "Windows 사용자 이름, 도메인, 비밀번호를 확인하세요."),
+        Protocol::Vnc => (
+            "화면 공유(VNC)가",
+            "VNC 비밀번호를, macOS 계정으로 로그인한다면 계정 이름과 비밀번호를 확인하세요.",
+        ),
     };
     // The jump host message is part of the target one, so tell them apart first.
     let target_key_changed = has("TARGET SSH HOST KEY CHANGED");
@@ -361,6 +365,16 @@ mod tests {
         assert_eq!(info.title, "원격 서버에 연결할 수 없습니다");
         assert!(info.hint.contains("SSH 서버가"), "{}", info.hint);
         assert!(!info.fix_in_settings);
+    }
+
+    #[test]
+    fn vnc_failures_point_at_the_screen_sharing_login() {
+        let info = explain("VNC authentication failed: Wrong password", &[], &State::Remote, Protocol::Vnc);
+        assert_eq!(info.title, "원격 PC 로그인에 실패했습니다");
+        assert!(info.hint.contains("VNC 비밀번호"), "{}", info.hint);
+        assert!(info.fix_in_settings);
+        let info = explain("TCP connect to VNC target: refused", &[], &State::Remote, Protocol::Vnc);
+        assert!(info.hint.contains("화면 공유(VNC)가"), "{}", info.hint);
     }
 
     #[test]

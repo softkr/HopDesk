@@ -57,6 +57,14 @@ pub fn ui(
                 }
                 let t = &profile.target;
                 widgets::info_row(ui, &pal, super::target_noun(profile.protocol), &format!("{}:{}", t.host, t.port));
+                if profile.protocol == Protocol::Vnc {
+                    let login = match t.user.as_str() {
+                        "" => "VNC 비밀번호".to_owned(),
+                        user => format!("macOS 계정 · {user}"),
+                    };
+                    widgets::info_row(ui, &pal, "로그인", &login);
+                    return;
+                }
                 if profile.protocol == Protocol::Ssh {
                     widgets::info_row(ui, &pal, "계정", &account(profile));
                     let auth = match &t.key_path {
@@ -85,6 +93,17 @@ pub fn ui(
                 ui.end_row();
             });
         });
+
+        if profile.protocol == Protocol::Vnc && !profile.use_jump {
+            ui.add_space(12.0);
+            widgets::banner(ui, pal.danger_soft, pal.danger.gamma_multiply(0.4), |ui| {
+                ui.label(RichText::new("암호화되지 않은 연결").bold().color(pal.danger));
+                ui.label(
+                    RichText::new("점프 호스트 없이 VNC로 접속하므로 화면과 키 입력이 네트워크에 그대로 보입니다.")
+                        .color(pal.text),
+                );
+            });
+        }
 
         if !log.is_empty() {
             ui.add_space(12.0);
@@ -119,7 +138,11 @@ fn header(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, 
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.add(egui::Label::new(RichText::new(&profile.name).size(HEADING_SIZE).bold()).truncate());
-            ui.label(RichText::new(format!("{} · {}", account(profile), profile.target.host)).color(pal.text_weak));
+            let sub = match account(profile).as_str() {
+                "" => profile.target.host.clone(),
+                account => format!("{account} · {}", profile.target.host),
+            };
+            ui.label(RichText::new(sub).color(pal.text_weak));
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = state.is_some_and(State::is_active);
@@ -307,7 +330,11 @@ fn status_area(ui: &mut Ui, pal: &Palette, protocol: Protocol, state: Option<&St
             Some(State::Connected) => {
                 ui.add_space(2.0);
                 widgets::status_pill(ui, pal.success, "연결됨");
-                let window = if protocol == Protocol::Ssh { "터미널" } else { "원격 데스크톱" };
+                let window = match protocol {
+                    Protocol::Rdp => "원격 데스크톱",
+                    Protocol::Ssh => "터미널",
+                    Protocol::Vnc => "화면 공유",
+                };
                 ui.label(RichText::new(format!("{window} 창이 열려 있습니다.")).color(pal.text_weak));
                 if ui.button("연결 끊기").clicked() {
                     *action = Action::Cancel;

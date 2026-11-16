@@ -2,10 +2,11 @@
 
 mod rdp;
 mod ssh;
+mod vnc;
 
 use std::sync::Arc;
 
-use anyhow::{Context as _, bail};
+use anyhow::Context as _;
 
 use crate::profile::{Profile, Protocol};
 use crate::trust::TrustStore;
@@ -28,6 +29,6 @@ pub fn run(
             rdp::run(profile, screen, password, tunnel, trust)
         }
         Protocol::Ssh => ssh::run(profile, password, tunnel, trust),
-        Protocol::Vnc => bail!("VNC sessions are not supported yet"),
+        Protocol::Vnc => vnc::run(profile, password, tunnel),
     }
 }

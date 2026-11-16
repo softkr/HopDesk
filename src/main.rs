@@ -5,6 +5,7 @@
 //! hopdesk add <name> [--jump user@bastion[:22] [--jump-key ~/.ssh/id_ed25519]]
 //!                        --target 10.0.0.5[:3389] --user Administrator [--domain CORP]
 //! hopdesk add <name> --protocol ssh [--jump ...] --target 10.0.0.7[:22] --user me [--key ~/.ssh/id_ed25519]
+//! hopdesk add <name> --protocol vnc [--jump ... [--user <macOS account>]] --target 10.0.0.9[:5900]
 //! hopdesk list
 //! hopdesk connect <name>
 //! hopdesk set-password <name> --jump | --target
@@ -98,9 +99,10 @@ struct AddArgs {
     /// Target as seen from the jump host, `host[:port]` (default port by protocol).
     #[arg(long)]
     target: String,
-    /// User name on the target.
+    /// User name on the target. VNC: a macOS account (through the jump host only); without it
+    /// the VNC password is used.
     #[arg(long)]
-    user: String,
+    user: Option<String>,
     /// Windows domain (RDP).
     #[arg(long)]
     domain: Option<String>,
@@ -154,6 +156,15 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
     if args.key.is_some() && args.protocol != Protocol::Ssh {
         bail!("--key applies to SSH only");
     }
+    let user = match (args.user, args.protocol) {
+        (Some(user), _) => user,
+        (None, Protocol::Vnc) => String::new(),
+        (None, _) => bail!("--user is required"),
+    };
+    // A macOS account password must not cross the network without the SSH channel.
+    if args.protocol == Protocol::Vnc && !user.is_empty() && args.jump.is_none() {
+        bail!("a macOS account (--user) needs --jump; without it the VNC password is used");
+    }
     let mut store = ProfileStore::load()?;
     let jump = match &args.jump {
         Some(jump) => {
@@ -178,7 +189,7 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
         target: Target {
             host: target_host,
             port: target_port,
-            user: args.user,
+            user,
             domain: args.domain,
             key_path: args.key,
         },
@@ -209,12 +220,16 @@ fn list() -> anyhow::Result<()> {
         } else {
             "direct".to_owned()
         };
+        // A VNC profile without a user logs on with the VNC password only.
+        let account = match (&p.target.domain, p.target.user.as_str()) {
+            (_, "") => String::new(),
+            (Some(domain), user) => format!("{domain}\\{user}@"),
+            (None, user) => format!("{user}@"),
+        };
         println!(
-            "{:<16} {:<4} {route} -> {}{}@{}:{}",
+            "{:<16} {:<4} {route} -> {account}{}:{}",
             p.name,
             protocol_name(p.protocol),
-            p.target.domain.as_deref().map(|d| format!("{d}\\")).unwrap_or_default(),
-            p.target.user,
             p.target.host,
             p.target.port,
         );
@@ -272,6 +287,12 @@ fn prompt_and_store(profile: &Profile, which: Secret) -> anyhow::Result<()> {
     let prompt = match which {
         _ if key_based => "Private key passphrase (empty if none): ".to_owned(),
         Secret::Jump => format!("Jump host password for {}@{}: ", profile.jump.user, profile.jump.host),
+        Secret::Target if profile.protocol == Protocol::Vnc && profile.target.user.is_empty() => {
+            format!("VNC password for {} (empty if none): ", profile.target.host)
+        }
+        Secret::Target if profile.protocol == Protocol::Vnc => {
+            format!("macOS password for {}@{}: ", profile.target.user, profile.target.host)
+        }
         Secret::Target => format!(
             "{} password for {}@{}: ",
             protocol_name(profile.protocol).to_uppercase(),
@@ -280,7 +301,9 @@ fn prompt_and_store(profile: &Profile, which: Secret) -> anyhow::Result<()> {
         ),
     };
     let value = rpassword::prompt_password(prompt)?;
-    if value.is_empty() && !key_based {
+    // A VNC server may ask for no password at all.
+    let optional = key_based || (which == Secret::Target && profile.protocol == Protocol::Vnc && profile.target.user.is_empty());
+    if value.is_empty() && !optional {
         bail!("password must not be empty");
     }
     profile.set_secret(which, &value)

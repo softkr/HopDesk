@@ -860,7 +860,11 @@ fn list_row(ui: &mut Ui, pal: &Palette, p: &Profile, selected: bool, state: Opti
     let max_w = (text_right - text_left).max(20.0);
 
     let name = single_line(ui, &p.name, FontId::new(14.0, bold_family()), pal.text, max_w);
-    let sub_text = format!("{}@{}", p.target.user, p.target.host);
+    // A VNC profile without a user logs on with the VNC password.
+    let sub_text = match p.target.user.as_str() {
+        "" => p.target.host.clone(),
+        user => format!("{user}@{}", p.target.host),
+    };
     let sub = single_line(ui, &sub_text, FontId::proportional(13.0), pal.text_weak, max_w);
     let total = name.size().y + 2.0 + sub.size().y;
     let top = rect.center().y - total / 2.0;

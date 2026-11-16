@@ -1,6 +1,6 @@
 # HopDesk
 
-SSH 점프 호스트(배스천)를 거쳐 사내망의 Windows PC에 원격 데스크톱(RDP)으로, Linux 등 서버에는 SSH 터미널로 접속하는 앱입니다. 점프 호스트 없이 바로 접속할 수도 있습니다. macOS, Windows, Linux에서 동작합니다.
+SSH 점프 호스트(배스천)를 거쳐 사내망의 Windows PC에 원격 데스크톱(RDP)으로, Linux 등 서버에는 SSH 터미널로, Mac·Linux 데스크톱에는 화면 공유(VNC)로 접속하는 앱입니다. 점프 호스트 없이 바로 접속할 수도 있습니다. macOS, Windows, Linux에서 동작합니다.
 
 터널을 따로 열고 원격 데스크톱 앱을 실행할 필요 없이, 저장한 연결을 고르고 **연결**을 누르면 됩니다.
 HopDesk가 SSH 터널을 열고 저장된 계정으로 Windows에 자동 로그인합니다.
@@ -11,6 +11,8 @@ HopDesk가 SSH 터널을 열고 저장된 계정으로 Windows에 자동 로그�
 
 - **한 번에 접속:** 점프 호스트 SSH 로그인부터 Windows 로그인까지 자동으로 처리합니다.
 - **SSH 터미널:** 연결 종류를 **터미널 (SSH)** 로 고르면 원격 서버의 셸이 HopDesk 터미널 창에서 열립니다. 점프 호스트를 거칠 수 있고, 비밀번호나 개인 키로 로그인합니다. 한글 입력, 256색·트루컬러, 드래그로 선택 후 복사(macOS ⌘C, Windows·Linux는 선택한 상태에서 Ctrl+C), 붙여넣기(⌘V / Ctrl+V), 스크롤백을 지원합니다. 원격 프로그램이 이 기기의 클립보드에 쓰는 기능(OSC 52)은 막아 둡니다.
+- **화면 공유 (VNC):** macOS 화면 공유, TigerVNC·x11vnc 같은 VNC 서버에 접속합니다. VNC 비밀번호로 로그인하거나, **점프 호스트를 거칠 때만** macOS 계정으로 로그인할 수 있습니다(macOS 계정 로그인 방식은 서버를 확인하지 않아, 중간에서 가로채면 계정 비밀번호가 드러나기 때문입니다). 키는 키보드 위치 기준으로 보내므로 한글은 원격 쪽 입력기로 칩니다. 텍스트 클립보드를 주고받습니다(⌘V / Ctrl+V는 로컬 클립보드를 원격으로 보낸 뒤 붙여넣습니다). 점프 호스트 없이 접속하면 화면과 키 입력이 암호화되지 않으므로 연결 화면에 경고를 표시합니다.
+  - macOS를 VNC 비밀번호로 접속하려면 원격 Mac의 **시스템 설정 → 일반 → 공유 → 화면 공유 → (i)** 에서 **VNC 사용자가 암호로 화면을 제어할 수 있음**을 켭니다.
 - **안전한 비밀번호 보관:** 비밀번호와 개인 키 암호는 운영체제의 보안 저장소(macOS 키체인, Windows 자격 증명 관리자, Linux Secret Service)에만 저장하고, 설정 파일에는 기록하지 않습니다.
 - **호스트 검증:** 처음 접속할 때 SSH 호스트 키(점프 호스트와 SSH 대상 서버)와 RDP 서버 인증서를 기억합니다(TOFU). 이후 바뀌면 접속을 막고 경고합니다.
 - **진행 상황 표시:** `이 Mac → 점프 호스트 → 원격 PC` 경로 그림에 연결 단계가 표시되고, 실패하면 어느 구간에서 막혔는지 알려 줍니다.
@@ -64,10 +66,10 @@ sudo apt install pkg-config cmake libasound2-dev libfontconfig1-dev libxkbcommon
 1. HopDesk를 실행하고 **새 연결 만들기**(⌘N, Windows·Linux는 Ctrl+N)를 누릅니다.
 2. 아래 항목을 입력하고 저장합니다(⌘S).
    - 점프 호스트의 주소, 사용자 이름, 인증 방식. 바로 접속할 PC라면 **사용 안 함 (직접 접속)**을 고릅니다(입력해 둔 점프 호스트 설정은 보관됩니다).
-   - 연결 종류: **원격 데스크톱 (RDP)** 또는 **터미널 (SSH)**. 만든 뒤에는 바꿀 수 없습니다.
+   - 연결 종류: **원격 데스크톱 (RDP)**, **터미널 (SSH)**, **화면 공유 (VNC)**. 만든 뒤에는 바꿀 수 없습니다.
    - 원격 PC(서버)의 주소. 점프 호스트를 쓰면 점프 호스트에서 보이는 주소(예: `10.0.0.5`)를, 직접 접속이면 이 기기에서 보이는 주소를 입력합니다.
-   - RDP는 Windows 계정, SSH는 사용자 이름과 비밀번호 또는 개인 키
-3. 목록에서 연결을 고르고 **연결**(Enter)을 누릅니다. 원격 데스크톱과 터미널은 별도 창으로 열립니다.
+   - RDP는 Windows 계정, SSH는 사용자 이름과 비밀번호 또는 개인 키, VNC는 VNC 비밀번호(또는 점프 호스트를 거칠 때 macOS 계정)
+3. 목록에서 연결을 고르고 **연결**(Enter)을 누릅니다. 원격 데스크톱, 터미널, 화면 공유는 별도 창으로 열립니다.
 
 Windows와 Linux에서는 ⌘ 대신 Ctrl을 누릅니다.
 
@@ -91,6 +93,8 @@ hopdesk add office --jump ubuntu@bastion.example.com:22 --jump-key ~/.ssh/id_ed2
 hopdesk add home --target pc.example.com --user hong   # --jump 없이: 직접 접속
 hopdesk add build --protocol ssh --jump ubuntu@bastion.example.com \
     --target 10.0.0.7 --user ubuntu --key ~/.ssh/id_ed25519   # SSH 터미널 (포트 기본값 22)
+hopdesk add design --protocol vnc --jump ubuntu@bastion.example.com \
+    --target 10.0.0.9 --user hong   # 화면 공유: macOS 계정 (--user 없이: VNC 비밀번호, 포트 기본값 5900)
 hopdesk list
 hopdesk connect office
 hopdesk set-password office --target  # 저장된 비밀번호 변경 (--jump: 점프 호스트)
@@ -116,6 +120,7 @@ HopDesk ──SSH──▶ 점프 호스트 ──direct-tcpip──▶ Windows 
 
 로컬 포트를 열지 않습니다. SSH `direct-tcpip` 채널을 RDP 연결의 전송 계층으로 바로 사용합니다.
 SSH 터미널도 같은 채널 위에서 대상 서버와 SSH 연결을 한 번 더 맺습니다(`ssh -J`와 같은 방식). 대상 서버의 호스트 키는 따로 검증합니다.
+VNC는 이 채널 위에서 RFB 프로토콜을 그대로 주고받습니다. VNC에는 서버를 확인하는 수단이 없어 호스트 검증(TOFU)을 하지 않습니다.
 TLS 인증서 검증과 CredSSP 인증은 실제 대상 호스트 이름을 기준으로 이루어집니다.
 
 ## 개발
@@ -132,7 +137,7 @@ scripts/make-icon.sh         # assets/icon/*.svg 로 아이콘 파일 생성 (re
 |---|---|
 | `src/main.rs` | 명령줄 인터페이스 |
 | `src/tunnel.rs` | SSH 점프 호스트 터널 |
-| `src/session.rs`, `src/session/` | 원격 세션 (프로토콜별 모듈, RDP: `rdp.rs`, SSH: `ssh.rs`) |
+| `src/session.rs`, `src/session/` | 원격 세션 (프로토콜별 모듈, RDP: `rdp.rs`, SSH: `ssh.rs`, VNC: `vnc.rs`) |
 | `src/terminal.rs` | SSH 세션의 터미널 화면 (alacritty_terminal + egui) |
 | `src/trust.rs` | 호스트 키·인증서 검증 |
 | `src/profile.rs` | 연결 설정과 키체인 |
@@ -157,4 +162,4 @@ macOS 앱은 모든 릴리스에서 같은 자체 서명 인증서로 서명합�
 
 ## 라이선스
 
-포함된 IronRDP는 MIT 또는 Apache-2.0 라이선스를 따릅니다. 터미널 에뮬레이션에 쓰는 alacritty_terminal은 Apache-2.0 라이선스를 따릅니다.
+포함된 IronRDP는 MIT 또는 Apache-2.0 라이선스를 따릅니다. 터미널 에뮬레이션에 쓰는 alacritty_terminal은 Apache-2.0, VNC 클라이언트 vnc-rs는 MIT 또는 Apache-2.0 라이선스를 따릅니다.
