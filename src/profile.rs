@@ -35,13 +35,24 @@ pub struct Profile {
 }
 
 /// Remote control protocol of a profile. Profiles saved before this field existed are RDP.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     #[default]
     Rdp,
     Ssh,
+    #[value(skip)]
     Vnc,
+}
+
+impl Protocol {
+    pub fn default_port(self) -> u16 {
+        match self {
+            Protocol::Rdp => 3389,
+            Protocol::Ssh => 22,
+            Protocol::Vnc => 5900,
+        }
+    }
 }
 
 /// How the session window starts.
@@ -84,6 +95,9 @@ pub struct Target {
     pub user: String,
     /// Windows domain (RDP only).
     pub domain: Option<String>,
+    /// Private key for an SSH target. When absent, password authentication is used.
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
 }
 
 fn default_use_jump() -> bool {
@@ -115,7 +129,8 @@ fn default_height() -> u16 {
 pub enum Secret {
     /// Jump host password, or private key passphrase when `key_path` is set.
     Jump,
-    /// Password on the target (Windows account for RDP).
+    /// Password on the target (Windows account for RDP), or the key passphrase of an SSH target
+    /// with `key_path` set.
     Target,
 }
 

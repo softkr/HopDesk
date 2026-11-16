@@ -4,9 +4,10 @@
 //! hopdesk                (no arguments: profile manager window)
 //! hopdesk add <name> [--jump user@bastion[:22] [--jump-key ~/.ssh/id_ed25519]]
 //!                        --target 10.0.0.5[:3389] --user Administrator [--domain CORP]
+//! hopdesk add <name> --protocol ssh [--jump ...] --target 10.0.0.7[:22] --user me [--key ~/.ssh/id_ed25519]
 //! hopdesk list
 //! hopdesk connect <name>
-//! hopdesk set-password <name> --jump | --rdp
+//! hopdesk set-password <name> --jump | --target
 //! hopdesk remove <name>
 //! hopdesk forget <host>
 //! ```
@@ -29,6 +30,7 @@ mod secret_store;
 mod session;
 mod shared_folder;
 mod status;
+mod terminal;
 mod trust;
 mod tunnel;
 mod update;
@@ -66,7 +68,8 @@ enum Command {
         name: String,
         #[arg(long, conflicts_with = "rdp", required_unless_present = "rdp")]
         jump: bool,
-        #[arg(long)]
+        /// Password on the target (or its key passphrase); `--rdp` is the older name.
+        #[arg(long, visible_alias = "target")]
         rdp: bool,
     },
     /// Connect using a profile (automatic login with the stored credentials).
@@ -90,15 +93,20 @@ struct AddArgs {
     /// Private key for the jump host (password authentication when omitted).
     #[arg(long)]
     jump_key: Option<PathBuf>,
-    /// RDP target as seen from the jump host, `host[:port]`.
+    #[arg(long, value_enum, default_value_t)]
+    protocol: Protocol,
+    /// Target as seen from the jump host, `host[:port]` (default port by protocol).
     #[arg(long)]
     target: String,
-    /// RDP user name.
+    /// User name on the target.
     #[arg(long)]
     user: String,
-    /// RDP domain.
+    /// Windows domain (RDP).
     #[arg(long)]
     domain: Option<String>,
+    /// Private key for the target (SSH; password authentication when omitted).
+    #[arg(long)]
+    key: Option<PathBuf>,
     #[arg(long, default_value_t = 1920)]
     width: u16,
     #[arg(long, default_value_t = 1080)]
@@ -140,6 +148,12 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn add(args: AddArgs) -> anyhow::Result<()> {
+    if args.domain.is_some() && args.protocol != Protocol::Rdp {
+        bail!("--domain applies to RDP only");
+    }
+    if args.key.is_some() && args.protocol != Protocol::Ssh {
+        bail!("--key applies to SSH only");
+    }
     let mut store = ProfileStore::load()?;
     let jump = match &args.jump {
         Some(jump) => {
@@ -153,12 +167,12 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
         }
         None => JumpHost::unset(),
     };
-    let (target_host, target_port) = parse_host_port(&args.target, 3389)?;
+    let (target_host, target_port) = parse_host_port(&args.target, args.protocol.default_port())?;
 
     let profile = Profile {
         id: uuid::Uuid::new_v4(),
         name: args.name,
-        protocol: Protocol::Rdp,
+        protocol: args.protocol,
         use_jump: args.jump.is_some(),
         jump,
         target: Target {
@@ -166,6 +180,7 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
             port: target_port,
             user: args.user,
             domain: args.domain,
+            key_path: args.key,
         },
         width: args.width,
         height: args.height,
@@ -195,8 +210,9 @@ fn list() -> anyhow::Result<()> {
             "direct".to_owned()
         };
         println!(
-            "{:<16} {route} -> {}{}@{}:{}",
+            "{:<16} {:<4} {route} -> {}{}@{}:{}",
             p.name,
+            protocol_name(p.protocol),
             p.target.domain.as_deref().map(|d| format!("{d}\\")).unwrap_or_default(),
             p.target.user,
             p.target.host,
@@ -227,9 +243,7 @@ fn connect(name: &str, screen: Option<(u16, u16)>) -> anyhow::Result<()> {
     let profile = store.get(name)?.clone();
     let trust = Arc::new(TrustStore::load()?);
 
-    let password = profile
-        .secret(Secret::Target)?
-        .context("no stored RDP password (use `set-password --rdp`)")?;
+    let password = profile.secret(Secret::Target)?;
 
     let tunnel = if profile.use_jump {
         let jump_secret = profile.secret(Secret::Jump)?.filter(|s| !s.is_empty());
@@ -251,16 +265,33 @@ fn connect(name: &str, screen: Option<(u16, u16)>) -> anyhow::Result<()> {
 }
 
 fn prompt_and_store(profile: &Profile, which: Secret) -> anyhow::Result<()> {
-    let prompt = match (which, profile.jump.key_path.is_some()) {
-        (Secret::Jump, false) => format!("Jump host password for {}@{}: ", profile.jump.user, profile.jump.host),
-        (Secret::Jump, true) => "Private key passphrase (empty if none): ".to_owned(),
-        (Secret::Target, _) => format!("RDP password for {}@{}: ", profile.target.user, profile.target.host),
+    let key_based = match which {
+        Secret::Jump => profile.jump.key_path.is_some(),
+        Secret::Target => profile.target.key_path.is_some(),
+    };
+    let prompt = match which {
+        _ if key_based => "Private key passphrase (empty if none): ".to_owned(),
+        Secret::Jump => format!("Jump host password for {}@{}: ", profile.jump.user, profile.jump.host),
+        Secret::Target => format!(
+            "{} password for {}@{}: ",
+            protocol_name(profile.protocol).to_uppercase(),
+            profile.target.user,
+            profile.target.host
+        ),
     };
     let value = rpassword::prompt_password(prompt)?;
-    if value.is_empty() && !(which == Secret::Jump && profile.jump.key_path.is_some()) {
+    if value.is_empty() && !key_based {
         bail!("password must not be empty");
     }
     profile.set_secret(which, &value)
+}
+
+fn protocol_name(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Rdp => "rdp",
+        Protocol::Ssh => "ssh",
+        Protocol::Vnc => "vnc",
+    }
 }
 
 fn parse_host_port(s: &str, default_port: u16) -> anyhow::Result<(String, u16)> {

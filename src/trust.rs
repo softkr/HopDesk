@@ -60,6 +60,15 @@ impl TrustStore {
         })
     }
 
+    /// A store kept at `path` instead of the per-user config directory.
+    #[cfg(test)]
+    pub fn at(path: PathBuf) -> Self {
+        Self {
+            path,
+            file: Mutex::new(TrustFile::default()),
+        }
+    }
+
     pub fn check(&self, kind: Kind, host: &str, fingerprint: &str) -> anyhow::Result<Verdict> {
         let mut file = self.file.lock().expect("trust store lock poisoned");
         let map = match kind {

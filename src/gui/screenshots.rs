@@ -31,6 +31,7 @@ fn profile(name: &str, jump: &str, target: &str, user: &str, key: bool) -> Profi
             port: 3389,
             user: user.into(),
             domain: (user == "hong").then(|| "CORP".into()),
+            key_path: None,
         },
         width: 1920,
         height: 1080,

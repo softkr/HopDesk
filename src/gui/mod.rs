@@ -7,7 +7,7 @@ mod detail;
 mod form;
 mod platform;
 mod sessions;
-mod theme;
+pub(crate) mod theme;
 #[cfg(any(target_os = "macos", windows))]
 mod tray;
 mod widgets;
@@ -32,9 +32,9 @@ use crate::update::{self, Release};
 
 /// macOS draws icons on Apple's grid (with margin); elsewhere the tile fills the square.
 #[cfg(target_os = "macos")]
-const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-256.png");
+pub(crate) const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-256.png");
 #[cfg(not(target_os = "macos"))]
-const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-full-256.png");
+pub(crate) const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-full-256.png");
 
 /// How often a running launcher looks for a newer release (it may stay in the menu bar for days).
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
