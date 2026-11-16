@@ -5,7 +5,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, RichText, Sense, Stroke,
 use super::sessions::{FailureInfo, State};
 use super::theme::{Bold as _, HEADING_SIZE, Palette, TITLE_SIZE, bold_family, palette};
 use super::widgets::{self, Icon, card};
-use crate::profile::{DisplayMode, Profile};
+use crate::profile::{DisplayMode, Profile, Protocol};
 
 pub enum Action {
     None,
@@ -37,7 +37,7 @@ pub fn ui(
         card(ui, |ui| {
             route(ui, &pal, profile, state);
             ui.add_space(8.0);
-            status_area(ui, &pal, state, &mut action);
+            status_area(ui, &pal, profile.protocol, state, &mut action);
         });
         ui.add_space(12.0);
 
@@ -56,7 +56,16 @@ pub fn ui(
                     widgets::info_row(ui, &pal, "점프 호스트", "사용 안 함 (직접 접속)");
                 }
                 let t = &profile.target;
-                widgets::info_row(ui, &pal, "원격 PC", &format!("{}:{}", t.host, t.port));
+                widgets::info_row(ui, &pal, super::target_noun(profile.protocol), &format!("{}:{}", t.host, t.port));
+                if profile.protocol == Protocol::Ssh {
+                    widgets::info_row(ui, &pal, "계정", &account(profile));
+                    let auth = match &t.key_path {
+                        Some(path) => format!("개인 키 · {}", tilde(path)),
+                        None => "비밀번호".to_owned(),
+                    };
+                    widgets::info_row(ui, &pal, "인증", &auth);
+                    return;
+                }
                 widgets::info_row(ui, &pal, "Windows 계정", &account(profile));
                 let resolution = match profile.display {
                     DisplayMode::Fixed => format!("{} × {}", profile.width, profile.height),
@@ -163,11 +172,15 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     let mut labels = vec![
         (Icon::Laptop, super::platform::THIS_DEVICE.to_owned(), "로컬".to_owned()),
         (Icon::Gateway, "점프 호스트".to_owned(), format!("{} · {jump_auth}", profile.jump.host)),
-        (Icon::Monitor, "원격 PC".to_owned(), format!("{}:{}", profile.target.host, profile.target.port)),
+        (
+            if profile.protocol == Protocol::Ssh { Icon::Terminal } else { Icon::Monitor },
+            super::target_noun(profile.protocol).to_owned(),
+            format!("{}:{}", profile.target.host, profile.target.port),
+        ),
     ];
     let mut positions = vec![0.16, 0.5, 0.84];
     if !profile.use_jump {
-        // Direct connection: this device -> remote PC. A failure before RDP is the remote PC's.
+        // Direct connection: this device -> target. A failure before the session is the target's.
         labels.remove(1);
         positions = vec![0.25, 0.75];
         let remote = match nodes[2] {
@@ -276,7 +289,7 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
 /// Idle, connecting and connected share one height so the cards below do not jump between states.
 const STATUS_HEIGHT: f32 = 84.0;
 
-fn status_area(ui: &mut Ui, pal: &Palette, state: Option<&State>, action: &mut Action) {
+fn status_area(ui: &mut Ui, pal: &Palette, protocol: Protocol, state: Option<&State>, action: &mut Action) {
     if let Some(State::Failed(info)) = state {
         failure(ui, pal, info, action);
         return;
@@ -294,19 +307,20 @@ fn status_area(ui: &mut Ui, pal: &Palette, state: Option<&State>, action: &mut A
             Some(State::Connected) => {
                 ui.add_space(2.0);
                 widgets::status_pill(ui, pal.success, "연결됨");
-                ui.label(RichText::new("원격 데스크톱 창이 열려 있습니다.").color(pal.text_weak));
+                let window = if protocol == Protocol::Ssh { "터미널" } else { "원격 데스크톱" };
+                ui.label(RichText::new(format!("{window} 창이 열려 있습니다.")).color(pal.text_weak));
                 if ui.button("연결 끊기").clicked() {
                     *action = Action::Cancel;
                 }
             }
             _ => {
                 let text = match state {
-                    Some(State::Remote) => "원격 PC에 로그인하는 중...",
-                    Some(State::Reconnecting) => "연결이 끊겨 다시 연결하는 중...",
-                    _ => "점프 호스트에 연결하는 중...",
+                    Some(State::Remote) => format!("{}에 로그인하는 중...", super::target_noun(protocol)),
+                    Some(State::Reconnecting) => "연결이 끊겨 다시 연결하는 중...".to_owned(),
+                    _ => "점프 호스트에 연결하는 중...".to_owned(),
                 };
                 ui.add_space(8.0);
-                progress_row(ui, pal, text, "취소", action);
+                progress_row(ui, pal, &text, "취소", action);
             }
         }
     });

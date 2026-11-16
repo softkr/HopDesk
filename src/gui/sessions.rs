@@ -9,6 +9,7 @@ use anyhow::Context as _;
 use eframe::egui;
 use uuid::Uuid;
 
+use crate::profile::Protocol;
 use crate::status::{self, Phase};
 
 const MAX_LOG_LINES: usize = 1000;
@@ -48,6 +49,8 @@ pub struct FailureInfo {
 pub struct Session {
     pub state: State,
     pub log: Vec<String>,
+    /// Decides how failures are explained.
+    protocol: Protocol,
     child: Option<Arc<Mutex<Child>>>,
     cancelled: bool,
 }
@@ -109,16 +112,16 @@ impl Sessions {
 
     #[cfg(test)]
     pub fn set_for_test(&self, id: Uuid, state: State, log: Vec<String>) {
-        self.lock().sessions.insert(id, Session { state, log, child: None, cancelled: false });
+        self.lock().sessions.insert(id, Session { state, log, protocol: Protocol::Rdp, child: None, cancelled: false });
     }
 
     #[cfg(test)]
     pub fn failure_for_test(detail: &str, at: &State) -> FailureInfo {
-        explain(detail, &[], at)
+        explain(detail, &[], at, Protocol::Rdp)
     }
 
     /// Starts `hopdesk connect <name>` for the profile and tracks its progress.
-    pub fn start(&self, id: Uuid, name: &str, ctx: &egui::Context) -> anyhow::Result<()> {
+    pub fn start(&self, id: Uuid, name: &str, protocol: Protocol, ctx: &egui::Context) -> anyhow::Result<()> {
         if self.state(id).is_some_and(|s| s.is_active()) {
             return Ok(());
         }
@@ -146,6 +149,7 @@ impl Sessions {
             Session {
                 state: State::Starting,
                 log: Vec::new(),
+                protocol,
                 child: Some(Arc::clone(&child)),
                 cancelled: false,
             },
@@ -181,7 +185,7 @@ impl Sessions {
                     Phase::Remote => Some(State::Remote),
                     Phase::Connected | Phase::LoggedIn => Some(State::Connected),
                     Phase::Reconnecting => Some(State::Reconnecting),
-                    Phase::Failed => Some(State::Failed(explain(&detail, &session.log, &session.state))),
+                    Phase::Failed => Some(State::Failed(explain(&detail, &session.log, &session.state, session.protocol))),
                     Phase::Ended => None,
                 };
                 // Keep the first failure; later lines are usually consequences of it.
@@ -214,7 +218,7 @@ impl Sessions {
             }
         } else if !failed {
             let detail = session.log.last().cloned().unwrap_or_default();
-            session.state = State::Failed(explain(&detail, &session.log, &session.state));
+            session.state = State::Failed(explain(&detail, &session.log, &session.state, session.protocol));
         }
     }
 }
@@ -237,77 +241,87 @@ fn session_log_file(name: &str) -> Option<std::fs::File> {
 }
 
 /// Turns raw error text into a short Korean explanation with a next step.
-fn explain(detail: &str, log: &[String], state: &State) -> FailureInfo {
+fn explain(detail: &str, log: &[String], state: &State, protocol: Protocol) -> FailureInfo {
     let all = format!("{detail}\n{}", log.join("\n"));
     let has = |needle: &str| all.to_lowercase().contains(&needle.to_lowercase());
 
-    let (title, hint, key_changed) = if has("SSH HOST KEY CHANGED") {
+    let target = super::target_noun(protocol);
+    let (service, account) = match protocol {
+        Protocol::Ssh => ("SSH 서버가", "사용자 이름과 비밀번호(또는 개인 키)를 확인하세요."),
+        _ => ("원격 데스크톱이", "Windows 사용자 이름, 도메인, 비밀번호를 확인하세요."),
+    };
+    // The jump host message is part of the target one, so tell them apart first.
+    let target_key_changed = has("TARGET SSH HOST KEY CHANGED");
+    let jump_key_changed = has("SSH HOST KEY CHANGED") && !target_key_changed;
+    let target_unreachable = has("SSH connect to target") || has("TCP connect");
+    let key_hint = |what: &str| {
+        format!(
+            "{what}를 교체한 것이 확실하다면 ‘호스트 키 초기화’ 후 다시 연결하세요. \
+             그렇지 않다면 중간자 공격일 수 있으니 관리자에게 먼저 확인하세요."
+        )
+    };
+
+    let (title, hint, key_changed): (String, String, bool) = if target_key_changed {
+        (format!("{target}의 SSH 키가 바뀌었습니다"), key_hint("키"), true)
+    } else if jump_key_changed {
         (
-            "점프 호스트의 SSH 키가 바뀌었습니다",
+            "점프 호스트의 SSH 키가 바뀌었습니다".into(),
             "서버를 새로 설치했거나 키를 교체했다면 ‘호스트 키 초기화’ 후 다시 연결하세요. \
-             그렇지 않다면 중간자 공격일 수 있으니 관리자에게 먼저 확인하세요.",
+             그렇지 않다면 중간자 공격일 수 있으니 관리자에게 먼저 확인하세요."
+                .into(),
             true,
         )
     } else if has("RDP CERTIFICATE CHANGED") {
-        (
-            "원격 PC의 인증서가 바뀌었습니다",
-            "인증서를 교체한 것이 확실하다면 ‘호스트 키 초기화’ 후 다시 연결하세요. \
-             그렇지 않다면 중간자 공격일 수 있으니 관리자에게 먼저 확인하세요.",
-            true,
-        )
+        ("원격 PC의 인증서가 바뀌었습니다".into(), key_hint("인증서"), true)
     } else if has("no stored") {
         (
-            "저장된 비밀번호가 없습니다",
-            "연결을 편집해서 비밀번호를 다시 입력하세요.",
+            "저장된 비밀번호가 없습니다".into(),
+            "연결을 편집해서 비밀번호를 다시 입력하세요.".into(),
             false,
         )
     } else if has("load private key") {
         (
-            "개인 키를 열 수 없습니다",
-            "키 파일 경로가 맞는지, 키 암호가 올바른지 확인하세요.",
+            "개인 키를 열 수 없습니다".into(),
+            "키 파일 경로가 맞는지, 키 암호가 올바른지 확인하세요.".into(),
             false,
         )
     } else if has("jump host authentication failed") {
         (
-            "점프 호스트 로그인에 실패했습니다",
-            "SSH 사용자 이름과 비밀번호(또는 개인 키)를 확인하세요.",
+            "점프 호스트 로그인에 실패했습니다".into(),
+            "SSH 사용자 이름과 비밀번호(또는 개인 키)를 확인하세요.".into(),
             false,
         )
     } else if has("SSH connect to jump host") {
         (
-            "점프 호스트에 연결할 수 없습니다",
-            "주소와 포트가 맞는지, 네트워크(VPN 등)에 연결되어 있는지 확인하세요.",
+            "점프 호스트에 연결할 수 없습니다".into(),
+            "주소와 포트가 맞는지, 네트워크(VPN 등)에 연결되어 있는지 확인하세요.".into(),
             false,
         )
-    } else if has("TCP connect") {
+    } else if target_unreachable {
         (
-            "원격 PC에 연결할 수 없습니다",
-            "주소와 포트가 맞는지, 네트워크(VPN 등)와 원격 데스크톱이 켜져 있는지 확인하세요.",
+            format!("{target}에 연결할 수 없습니다"),
+            format!("주소와 포트가 맞는지, 네트워크(VPN 등)와 {service} 켜져 있는지 확인하세요."),
             false,
         )
     } else if has("direct-tcpip") {
         (
-            "원격 PC에 도달할 수 없습니다",
-            "점프 호스트에서 본 원격 PC 주소·포트가 맞는지, 원격 데스크톱이 켜져 있는지 확인하세요.",
+            format!("{target}에 도달할 수 없습니다"),
+            format!("점프 호스트에서 본 {target} 주소·포트가 맞는지, {service} 켜져 있는지 확인하세요."),
             false,
         )
     } else if has("logon") || has("credssp") || has("authentication") || has("password") {
-        (
-            "원격 PC 로그인에 실패했습니다",
-            "Windows 사용자 이름, 도메인, 비밀번호를 확인하세요.",
-            false,
-        )
+        (format!("{target} 로그인에 실패했습니다"), account.into(), false)
     } else {
         (
-            "연결하지 못했습니다",
-            "아래 자세한 내용을 확인하거나 잠시 후 다시 시도하세요.",
+            "연결하지 못했습니다".into(),
+            "아래 자세한 내용을 확인하거나 잠시 후 다시 시도하세요.".into(),
             false,
         )
     };
 
     FailureInfo {
-        title: title.to_owned(),
-        hint: hint.to_owned(),
+        title,
+        hint,
         detail: detail.trim().to_owned(),
         key_changed,
         fix_in_settings: has("no stored")
@@ -316,8 +330,49 @@ fn explain(detail: &str, log: &[String], state: &State) -> FailureInfo {
             || (!key_changed
                 && !has("SSH connect to jump host")
                 && !has("direct-tcpip")
-                && !has("TCP connect")
+                && !target_unreachable
                 && (has("logon") || has("credssp") || has("authentication") || has("password"))),
-        at_remote: matches!(state, State::Remote | State::Connected | State::Reconnecting) && !has("SSH HOST KEY CHANGED"),
+        at_remote: matches!(state, State::Remote | State::Connected | State::Reconnecting) && !jump_key_changed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rdp_wording_is_unchanged() {
+        let info = explain("TCP connect: refused", &[], &State::Remote, Protocol::Rdp);
+        assert_eq!(info.title, "원격 PC에 연결할 수 없습니다");
+        assert_eq!(info.hint, "주소와 포트가 맞는지, 네트워크(VPN 등)와 원격 데스크톱이 켜져 있는지 확인하세요.");
+        let info = explain("logon failed", &[], &State::Remote, Protocol::Rdp);
+        assert_eq!(info.hint, "Windows 사용자 이름, 도메인, 비밀번호를 확인하세요.");
+        assert!(info.fix_in_settings);
+    }
+
+    #[test]
+    fn ssh_target_failures_name_the_server() {
+        let info = explain("SSH authentication failed on the remote host", &[], &State::Remote, Protocol::Ssh);
+        assert_eq!(info.title, "원격 서버 로그인에 실패했습니다");
+        assert!(info.hint.contains("개인 키"), "{}", info.hint);
+        assert!(info.fix_in_settings && info.at_remote);
+
+        let info = explain("SSH connect to target: Connection refused", &[], &State::Remote, Protocol::Ssh);
+        assert_eq!(info.title, "원격 서버에 연결할 수 없습니다");
+        assert!(info.hint.contains("SSH 서버가"), "{}", info.hint);
+        assert!(!info.fix_in_settings);
+    }
+
+    #[test]
+    fn a_changed_target_key_is_not_blamed_on_the_jump_host() {
+        let log = ["ERROR TARGET SSH HOST KEY CHANGED - possible man-in-the-middle".to_owned()];
+        let info = explain("SSH connect to target: unknown key", &log, &State::Remote, Protocol::Ssh);
+        assert_eq!(info.title, "원격 서버의 SSH 키가 바뀌었습니다");
+        assert!(info.key_changed && info.at_remote);
+
+        let log = ["ERROR SSH HOST KEY CHANGED - possible man-in-the-middle".to_owned()];
+        let info = explain("SSH connect to jump host", &log, &State::Ssh, Protocol::Ssh);
+        assert_eq!(info.title, "점프 호스트의 SSH 키가 바뀌었습니다");
+        assert!(info.key_changed && !info.at_remote);
     }
 }

@@ -20,8 +20,9 @@ pub enum Field {
     JumpSecret,
     TargetHost,
     TargetPort,
-    RdpUser,
-    RdpPassword,
+    TargetUser,
+    TargetKeyPath,
+    TargetSecret,
     Resolution,
 }
 
@@ -77,15 +78,21 @@ pub struct Form {
     jump_secret: String,
     /// Existing profile: the stored secret is kept unless the user chooses to change it.
     change_jump_secret: bool,
-    /// Kept as stored; the form edits RDP settings only so far.
+    /// Chosen when the profile is created; fixed afterwards, because the stored target secret
+    /// means something else for each protocol.
     protocol: Protocol,
-    target_key_path: Option<PathBuf>,
     target_host: String,
     target_port: String,
-    rdp_user: String,
+    target_user: String,
+    /// RDP only.
     domain: String,
-    rdp_password: String,
-    change_rdp_password: bool,
+    /// SSH only: how to log on to the target.
+    target_auth: Auth,
+    stored_target_auth: Option<Auth>,
+    target_key_path: String,
+    /// Password on the target, or the key passphrase.
+    target_secret: String,
+    change_target_secret: bool,
     width: String,
     height: String,
     display: DisplayMode,
@@ -119,13 +126,15 @@ impl Form {
             jump_secret: String::new(),
             change_jump_secret: true,
             protocol: Protocol::Rdp,
-            target_key_path: None,
             target_host: String::new(),
-            target_port: "3389".into(),
-            rdp_user: String::new(),
+            target_port: Protocol::Rdp.default_port().to_string(),
+            target_user: String::new(),
             domain: String::new(),
-            rdp_password: String::new(),
-            change_rdp_password: true,
+            target_auth: Auth::Password,
+            stored_target_auth: None,
+            target_key_path: String::new(),
+            target_secret: String::new(),
+            change_target_secret: true,
             width: "1920".into(),
             height: "1080".into(),
             display: DisplayMode::default(),
@@ -138,6 +147,7 @@ impl Form {
 
     pub fn from_profile(p: &Profile) -> Self {
         let auth = if p.jump.key_path.is_some() { Auth::Key } else { Auth::Password };
+        let target_auth = if p.target.key_path.is_some() { Auth::Key } else { Auth::Password };
         Self {
             id: Some(p.id),
             stored_auth: Some(auth),
@@ -152,13 +162,15 @@ impl Form {
             jump_secret: String::new(),
             change_jump_secret: false,
             protocol: p.protocol,
-            target_key_path: p.target.key_path.clone(),
             target_host: p.target.host.clone(),
             target_port: p.target.port.to_string(),
-            rdp_user: p.target.user.clone(),
+            target_user: p.target.user.clone(),
             domain: p.target.domain.clone().unwrap_or_default(),
-            rdp_password: String::new(),
-            change_rdp_password: false,
+            target_auth,
+            stored_target_auth: Some(target_auth),
+            target_key_path: p.target.key_path.as_ref().map(|k| display_path(k)).unwrap_or_default(),
+            target_secret: String::new(),
+            change_target_secret: false,
             width: p.width.to_string(),
             height: p.height.to_string(),
             display: p.display,
@@ -195,6 +207,28 @@ impl Form {
         self.is_new() || self.auth_switched() || self.stored_use_jump == Some(false)
     }
 
+    fn target_auth_switched(&self) -> bool {
+        self.stored_target_auth.is_some_and(|a| a != self.target_auth)
+    }
+
+    /// The target secret must be (re-)entered: new profile, or an SSH target with another auth method.
+    fn target_secret_required(&self) -> bool {
+        self.is_new() || (self.protocol == Protocol::Ssh && self.target_auth_switched())
+    }
+
+    /// SSH targets log on with a key when chosen; RDP always uses the Windows password.
+    fn target_uses_key(&self) -> bool {
+        self.protocol == Protocol::Ssh && self.target_auth == Auth::Key
+    }
+
+    /// Picks the protocol of a new profile; the port follows unless the user typed another one.
+    fn set_protocol(&mut self, protocol: Protocol) {
+        if self.target_port.trim() == self.protocol.default_port().to_string() {
+            self.target_port = protocol.default_port().to_string();
+        }
+        self.protocol = protocol;
+    }
+
     /// Validates every field and builds the profile.
     pub fn validate(&self, store: &ProfileStore) -> Result<Profile, Errors> {
         let mut errors = Errors::new();
@@ -225,8 +259,16 @@ impl Form {
                 (self.auth == Auth::Key && !key.is_empty()).then(|| key.to_owned()),
             )
         };
-        let target_host = required(Field::TargetHost, &self.target_host, "원격 PC 주소를 입력하세요");
-        let rdp_user = required(Field::RdpUser, &self.rdp_user, "Windows 사용자 이름을 입력하세요");
+        let noun = super::target_noun(self.protocol);
+        let target_host = required(Field::TargetHost, &self.target_host, &format!("{noun} 주소를 입력하세요"));
+        let user_message = match self.protocol {
+            Protocol::Rdp => "Windows 사용자 이름을 입력하세요",
+            _ => "사용자 이름을 입력하세요",
+        };
+        let target_user = required(Field::TargetUser, &self.target_user, user_message);
+        let target_key_path = self
+            .target_uses_key()
+            .then(|| required(Field::TargetKeyPath, &self.target_key_path, "개인 키 파일을 선택하세요"));
 
         if !name.is_empty()
             && store
@@ -251,6 +293,7 @@ impl Form {
         let size = |v: &str| v.trim().parse::<u16>().ok().filter(|n| (640..=8192).contains(n));
         let (width, height) = match (size(&self.width), size(&self.height)) {
             (Some(w), Some(h)) => (w, h),
+            _ if self.protocol != Protocol::Rdp => (1920, 1080),
             _ => {
                 errors.insert(Field::Resolution, "가로·세로는 640–8192 사이여야 합니다".into());
                 (0, 0)
@@ -262,8 +305,11 @@ impl Form {
         if needs_jump_secret && self.jump_secret.is_empty() {
             errors.insert(Field::JumpSecret, "비밀번호를 입력하세요".into());
         }
-        if (self.is_new() || self.change_rdp_password) && self.rdp_password.is_empty() {
-            errors.insert(Field::RdpPassword, "비밀번호를 입력하세요".into());
+        // A key passphrase may be empty.
+        let needs_target_secret =
+            !self.target_uses_key() && (self.target_secret_required() || self.change_target_secret);
+        if needs_target_secret && self.target_secret.is_empty() {
+            errors.insert(Field::TargetSecret, "비밀번호를 입력하세요".into());
         }
 
         if !errors.is_empty() {
@@ -284,9 +330,9 @@ impl Form {
             target: Target {
                 host: target_host,
                 port: target_port,
-                user: rdp_user,
-                domain: (!domain.is_empty()).then(|| domain.to_owned()),
-                key_path: self.target_key_path.clone(),
+                user: target_user,
+                domain: (self.protocol == Protocol::Rdp && !domain.is_empty()).then(|| domain.to_owned()),
+                key_path: target_key_path.map(|k| expand_tilde(&k)),
             },
             width,
             height,
@@ -297,14 +343,14 @@ impl Form {
     /// Writes changed secrets to the credential store, then saves the profile list.
     pub fn commit(&self, profile: &Profile, store: &mut ProfileStore) -> anyhow::Result<()> {
         let write_jump = self.use_jump && (self.jump_secret_required() || self.change_jump_secret);
-        let write_rdp = self.is_new() || self.change_rdp_password;
+        let write_target = self.target_secret_required() || self.change_target_secret;
         store.upsert(profile.clone())?;
         if write_jump {
             // A key without passphrase stores an empty secret.
             profile.set_secret(Secret::Jump, &self.jump_secret)?;
         }
-        if write_rdp {
-            profile.set_secret(Secret::Target, &self.rdp_password)?;
+        if write_target {
+            profile.set_secret(Secret::Target, &self.target_secret)?;
         }
         store.save()
     }
@@ -330,7 +376,7 @@ impl Form {
             ui.vertical(|ui| {
                 ui.label(RichText::new(if self.is_new() { "새 연결" } else { "연결 편집" }).size(super::theme::HEADING_SIZE).bold());
                 ui.label(
-                    RichText::new("원격 Windows PC에 직접 또는 SSH 점프 호스트를 거쳐 접속합니다.").color(pal.text_weak),
+                    RichText::new("원격 PC나 서버에 직접 또는 SSH 점프 호스트를 거쳐 접속합니다.").color(pal.text_weak),
                 );
             });
         });
@@ -371,22 +417,31 @@ impl Form {
                 if std::mem::take(&mut self.focus_pending) {
                     response.request_focus();
                 }
+                field(ui, "종류", None, |ui| {
+                    if self.is_new() {
+                        let mut protocol = self.protocol;
+                        let options = [(Protocol::Rdp, "원격 데스크톱 (RDP)"), (Protocol::Ssh, "터미널 (SSH)")];
+                        if widgets::segmented(ui, &mut protocol, &options) {
+                            self.set_protocol(protocol);
+                        }
+                    } else {
+                        ui.label(protocol_label(self.protocol));
+                    }
+                });
             });
 
             card(ui, |ui| {
-                section_title(
-                    ui,
-                    "SSH 점프 호스트",
-                    Some("원격 PC로 들어가는 관문 역할을 하는 SSH 서버입니다."),
-                );
+                let description = format!("{}로 들어가는 관문 역할을 하는 SSH 서버입니다.", super::target_noun(self.protocol));
+                section_title(ui, "SSH 점프 호스트", Some(description.as_str()));
                 field(ui, "사용", None, |ui| {
                     widgets::segmented(ui, &mut self.use_jump, &[(true, "사용"), (false, "사용 안 함 (직접 접속)")]);
                 });
                 if !self.use_jump {
-                    ui.label(
-                        RichText::new("점프 호스트 없이 원격 PC에 바로 접속합니다. 입력해 둔 설정은 보관됩니다.")
-                            .color(pal.text_weak),
+                    let text = format!(
+                        "점프 호스트 없이 {}에 바로 접속합니다. 입력해 둔 설정은 보관됩니다.",
+                        super::target_noun(self.protocol)
                     );
+                    ui.label(RichText::new(text).color(pal.text_weak));
                     return;
                 }
                 host_port_row(
@@ -438,93 +493,145 @@ impl Form {
             });
 
             card(ui, |ui| {
-                section_title(
-                    ui,
-                    "원격 PC (RDP)",
-                    Some(if self.use_jump {
-                        "주소는 점프 호스트에서 접근하는 기준으로 입력하세요. 예: 10.0.0.5"
-                    } else {
-                        "이 기기에서 바로 접근할 수 있는 주소를 입력하세요. 예: pc.example.com"
-                    }),
-                );
+                let title = match self.protocol {
+                    Protocol::Rdp => "원격 PC (RDP)",
+                    _ => "원격 서버 (SSH)",
+                };
+                let noun = super::target_noun(self.protocol);
+                let example = match self.protocol {
+                    Protocol::Rdp => "pc.example.com",
+                    _ => "server.example.com",
+                };
+                let description = if self.use_jump {
+                    format!("{noun} 주소는 점프 호스트에서 접근하는 기준으로 입력하세요. 예: 10.0.0.5")
+                } else {
+                    format!("이 기기에서 바로 접근할 수 있는 주소를 입력하세요. 예: {example}")
+                };
+                section_title(ui, title, Some(description.as_str()));
                 host_port_row(
                     ui,
                     full,
                     (&mut self.target_host, "예: 10.0.0.5", err(Field::TargetHost)),
                     (&mut self.target_port, err(Field::TargetPort)),
                 );
-                ui.horizontal(|ui| {
-                    let half = (full - 8.0) / 2.0;
-                    let edit = text_input(ui, &mut self.rdp_user, "예: Administrator", half, err(Field::RdpUser).is_some());
-                    field(ui, "Windows 사용자 이름", err(Field::RdpUser), |ui| ui.add(edit));
-                    let edit = text_input(ui, &mut self.domain, "선택 사항", half, false);
-                    field(ui, "도메인", None, |ui| ui.add(edit));
+                if self.protocol == Protocol::Rdp {
+                    ui.horizontal(|ui| {
+                        let half = (full - 8.0) / 2.0;
+                        let edit =
+                            text_input(ui, &mut self.target_user, "예: Administrator", half, err(Field::TargetUser).is_some());
+                        field(ui, "Windows 사용자 이름", err(Field::TargetUser), |ui| ui.add(edit));
+                        let edit = text_input(ui, &mut self.domain, "선택 사항", half, false);
+                        field(ui, "도메인", None, |ui| ui.add(edit));
+                    });
+                    let force = self.is_new();
+                    secret_field(
+                        ui,
+                        full,
+                        "Windows 비밀번호",
+                        "",
+                        &mut self.target_secret,
+                        &mut self.change_target_secret,
+                        force,
+                        err(Field::TargetSecret),
+                    );
+                    return;
+                }
+
+                let edit = text_input(ui, &mut self.target_user, "예: ubuntu", full, err(Field::TargetUser).is_some());
+                field(ui, "사용자 이름", err(Field::TargetUser), |ui| ui.add(edit));
+                field(ui, "인증 방식", None, |ui| {
+                    let options = [(Auth::Password, "비밀번호"), (Auth::Key, "개인 키")];
+                    if widgets::segmented(ui, &mut self.target_auth, &options) {
+                        self.target_secret.clear();
+                        self.change_target_secret = self.is_new() || self.target_auth_switched();
+                    }
                 });
-                let force = self.is_new();
+                if self.target_auth == Auth::Key {
+                    field(ui, "개인 키 파일", err(Field::TargetKeyPath), |ui| {
+                        input_row(ui, full, |ui| {
+                            if ui.button("찾아보기...").clicked()
+                                && let Some(path) = pick_key_file(&self.target_key_path)
+                            {
+                                self.target_key_path = display_path(&path);
+                            }
+                            let invalid = err(Field::TargetKeyPath).is_some();
+                            let w = ui.available_width();
+                            ui.add(text_input(ui, &mut self.target_key_path, "예: ~/.ssh/id_ed25519", w, invalid));
+                        });
+                    });
+                }
+                let (label, hint) = match self.target_auth {
+                    Auth::Password => ("비밀번호", ""),
+                    Auth::Key => ("키 암호", "암호가 없으면 비워 두세요"),
+                };
+                let force = self.target_secret_required();
                 secret_field(
                     ui,
                     full,
-                    "Windows 비밀번호",
-                    "",
-                    &mut self.rdp_password,
-                    &mut self.change_rdp_password,
+                    label,
+                    hint,
+                    &mut self.target_secret,
+                    &mut self.change_target_secret,
                     force,
-                    err(Field::RdpPassword),
+                    err(Field::TargetSecret),
                 );
             });
 
-            card(ui, |ui| {
-                section_title(ui, "화면", None);
-                field(ui, "해상도", err(Field::Resolution), |ui| {
-                    ui.horizontal(|ui| {
-                        let fixed = self.display == DisplayMode::Fixed;
-                        let custom = fixed && self.custom_resolution;
-                        let selected = if !fixed {
-                            self.display.label().to_owned()
-                        } else if custom {
-                            "직접 입력".to_owned()
-                        } else {
-                            format!("{} × {}", self.width.trim(), self.height.trim())
-                        };
-                        egui::ComboBox::from_id_salt("resolution")
-                            .selected_text(selected)
-                            .width(180.0)
-                            .show_ui(ui, |ui| {
-                                for mode in [DisplayMode::Fullscreen, DisplayMode::Maximized] {
-                                    if ui.selectable_label(self.display == mode, mode.label()).clicked() {
-                                        self.display = mode;
+            // Screen settings apply to the remote desktop only.
+            if self.protocol == Protocol::Rdp {
+                card(ui, |ui| {
+                    section_title(ui, "화면", None);
+                    field(ui, "해상도", err(Field::Resolution), |ui| {
+                        ui.horizontal(|ui| {
+                            let fixed = self.display == DisplayMode::Fixed;
+                            let custom = fixed && self.custom_resolution;
+                            let selected = if !fixed {
+                                self.display.label().to_owned()
+                            } else if custom {
+                                "직접 입력".to_owned()
+                            } else {
+                                format!("{} × {}", self.width.trim(), self.height.trim())
+                            };
+                            egui::ComboBox::from_id_salt("resolution")
+                                .selected_text(selected)
+                                .width(180.0)
+                                .show_ui(ui, |ui| {
+                                    for mode in [DisplayMode::Fullscreen, DisplayMode::Maximized] {
+                                        if ui.selectable_label(self.display == mode, mode.label()).clicked() {
+                                            self.display = mode;
+                                        }
                                     }
-                                }
-                                for (w, h) in RESOLUTIONS {
-                                    let is = fixed
-                                        && !self.custom_resolution
-                                        && self.width.trim() == w.to_string()
-                                        && self.height.trim() == h.to_string();
-                                    if ui.selectable_label(is, format!("{w} × {h}")).clicked() {
-                                        self.width = w.to_string();
-                                        self.height = h.to_string();
+                                    for (w, h) in RESOLUTIONS {
+                                        let is = fixed
+                                            && !self.custom_resolution
+                                            && self.width.trim() == w.to_string()
+                                            && self.height.trim() == h.to_string();
+                                        if ui.selectable_label(is, format!("{w} × {h}")).clicked() {
+                                            self.width = w.to_string();
+                                            self.height = h.to_string();
+                                            self.display = DisplayMode::Fixed;
+                                            self.custom_resolution = false;
+                                        }
+                                    }
+                                    if ui.selectable_label(custom, "직접 입력").clicked() {
                                         self.display = DisplayMode::Fixed;
-                                        self.custom_resolution = false;
+                                        self.custom_resolution = true;
                                     }
-                                }
-                                if ui.selectable_label(custom, "직접 입력").clicked() {
-                                    self.display = DisplayMode::Fixed;
-                                    self.custom_resolution = true;
-                                }
-                            });
-                        if custom {
-                            let invalid = err(Field::Resolution).is_some();
-                            ui.add(text_input(ui, &mut self.width, "가로", 70.0, invalid));
-                            ui.label("×");
-                            ui.add(text_input(ui, &mut self.height, "세로", 70.0, invalid));
-                        }
-                        if self.display == DisplayMode::Fullscreen {
-                            let shortcut = if cfg!(target_os = "macos") { "⌘⌥Enter" } else { "Ctrl+Alt+Enter" };
-                            ui.label(RichText::new(format!("{shortcut}로 창 모드 전환")).small().color(pal.text_weak));
-                        }
+                                });
+                            if custom {
+                                let invalid = err(Field::Resolution).is_some();
+                                ui.add(text_input(ui, &mut self.width, "가로", 70.0, invalid));
+                                ui.label("×");
+                                ui.add(text_input(ui, &mut self.height, "세로", 70.0, invalid));
+                            }
+                            if self.display == DisplayMode::Fullscreen {
+                                let shortcut = if cfg!(target_os = "macos") { "⌘⌥Enter" } else { "Ctrl+Alt+Enter" };
+                                ui.label(RichText::new(format!("{shortcut}로 창 모드 전환")).small().color(pal.text_weak));
+                            }
+                        });
                     });
                 });
-            });
+            }
 
             ui.label(
                 RichText::new(format!("비밀번호는 {}에만 저장되며, 설정 파일에는 기록되지 않습니다.", super::platform::SECRET_STORE))
@@ -535,6 +642,14 @@ impl Form {
         });
 
         action
+    }
+}
+
+fn protocol_label(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Rdp => "원격 데스크톱 (RDP)",
+        Protocol::Ssh => "터미널 (SSH)",
+        Protocol::Vnc => "원격 데스크톱 (VNC)",
     }
 }
 
@@ -635,4 +750,65 @@ fn pick_key_file(current: &str) -> Option<PathBuf> {
         dialog = dialog.set_directory(dir);
     }
     dialog.pick_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ssh_form() -> Form {
+        let mut form = Form::new_profile();
+        form.name = "build".into();
+        form.use_jump = false;
+        form.set_protocol(Protocol::Ssh);
+        form.target_host = "10.0.0.7".into();
+        form.target_user = "ubuntu".into();
+        form
+    }
+
+    #[test]
+    fn the_port_follows_the_protocol_unless_typed() {
+        let mut form = Form::new_profile();
+        form.set_protocol(Protocol::Ssh);
+        assert_eq!(form.target_port, "22");
+        form.target_port = "2222".into();
+        form.set_protocol(Protocol::Rdp);
+        assert_eq!(form.target_port, "2222");
+    }
+
+    #[test]
+    fn an_ssh_key_may_have_no_passphrase() {
+        let mut form = ssh_form();
+        form.target_auth = Auth::Key;
+        assert!(form.validate(&ProfileStore::default()).unwrap_err().contains_key(&Field::TargetKeyPath));
+        form.target_key_path = "/keys/id_ed25519".into();
+        let profile = form.validate(&ProfileStore::default()).expect("valid");
+        assert_eq!(profile.protocol, Protocol::Ssh);
+        assert_eq!(profile.target.key_path, Some(PathBuf::from("/keys/id_ed25519")));
+        assert_eq!(profile.target.domain, None);
+    }
+
+    #[test]
+    fn an_ssh_password_is_required() {
+        let mut form = ssh_form();
+        form.domain = "CORP".into();
+        assert!(form.validate(&ProfileStore::default()).unwrap_err().contains_key(&Field::TargetSecret));
+        form.target_secret = "secret".into();
+        let profile = form.validate(&ProfileStore::default()).expect("valid");
+        assert_eq!(profile.target.key_path, None);
+        assert_eq!(profile.target.domain, None, "a domain is RDP only");
+    }
+
+    #[test]
+    fn editing_keeps_the_protocol_and_asks_again_after_an_auth_switch() {
+        let mut form = ssh_form();
+        form.target_secret = "secret".into();
+        let profile = form.validate(&ProfileStore::default()).expect("valid");
+        let mut edit = Form::from_profile(&profile);
+        assert_eq!(edit.protocol, Protocol::Ssh);
+        assert!(edit.validate(&ProfileStore::default()).is_ok(), "the stored password is kept");
+        edit.target_auth = Auth::Key;
+        edit.target_key_path = "/keys/id_ed25519".into();
+        assert!(edit.target_secret_required(), "the old password is no key passphrase");
+    }
 }

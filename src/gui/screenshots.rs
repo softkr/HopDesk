@@ -141,6 +141,23 @@ fn screenshots() {
     h.state_mut().apply_nav(Nav::Edit(direct_id));
     shot(&mut h, "09-direct-edit");
 
+    // SSH terminal profile: detail while connected (dark), then its edit form
+    let mut ssh = profile("빌드 서버 셸", "bastion.example.com", "10.20.1.30", "ubuntu", false);
+    ssh.protocol = Protocol::Ssh;
+    ssh.target.port = 22;
+    ssh.target.domain = None;
+    ssh.target.key_path = Some(PathBuf::from("/Users/me/.ssh/id_ed25519"));
+    let ssh_id = ssh.id;
+    let sessions = Sessions::default();
+    sessions.set_for_test(ssh_id, State::Connected, vec![]);
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![ssh.clone()]), sessions), true);
+    shot(&mut h, "12-ssh-connected-dark");
+    // Without the jump host, so the SSH target section is in view.
+    ssh.use_jump = false;
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![ssh]), Sessions::default()), true);
+    h.state_mut().apply_nav(Nav::Edit(ssh_id));
+    shot(&mut h, "13-ssh-edit-dark");
+
     // 10. Update offered in the sidebar
     let h_launcher = Launcher::with_store(ProfileStore::from_profiles(sample()), Sessions::default());
     h_launcher.set_update_state(super::UpdateState::Available(crate::update::Release::for_test("0.1.4")));
