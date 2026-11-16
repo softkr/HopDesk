@@ -1,9 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="181 182 660 660">
-<title>HopDesk menu bar icon (template: black on transparent)</title>
-<!-- assets/brand/hopdesk-glyph-hd-arrow.svg in black; macOS tints it. -->
-<defs>
- <mask id="mAr" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="#fff"/><path d="M268.0,772.7 C328.0,625.7 434.6,582.3 599.6,542.3 L597.7,610.6 L769.7,437.2 L537.3,361.8 L570.4,421.7 C405.4,461.7 232.0,614.3 256.0,771.3 Z" fill="#000" stroke="#000" stroke-width="44" stroke-linejoin="round" stroke-linecap="round"/></mask>
-</defs>
-<g fill="#000" mask="url(#mAr)"><path d="M200,250 H286 V764 H200 Z"/><path fill-rule="evenodd" d="M445,250 H565 A257,257 0 0 1 565,764 H445 Z M530,335 V679 H565 A172,172 0 0 0 565,335 Z"/></g>
-<path d="M268.0,772.7 C328.0,625.7 434.6,582.3 599.6,542.3 L597.7,610.6 L769.7,437.2 L537.3,361.8 L570.4,421.7 C405.4,461.7 232.0,614.3 256.0,771.3 Z" fill="#000" stroke="#000" stroke-width="6" stroke-linejoin="round"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8.5h9M9.5 6 7 8.5 9.5 11M17 12H8M14.5 9.5 17 12l-2.5 2.5" stroke-width="1.6"/></svg>

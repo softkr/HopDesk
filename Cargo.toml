@@ -1,6 +1,6 @@
 [package]
 name = "hopdesk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "HopDesk: RDP desktop client connecting through an SSH jump host"
 publish = false
@@ -15,8 +15,12 @@ ironrdp-tls = { path = "third_party/IronRDP/crates/ironrdp-tls", features = ["ru
 # Shared folder (drive redirection)
 ironrdp-rdpdr-native = { path = "third_party/IronRDP/crates/ironrdp-rdpdr-native" }
 
-# SSH jump host
+# SSH jump host and SSH sessions
 russh = "0.65"
+# Terminal emulation for SSH sessions (rendered with egui)
+alacritty_terminal = { version = "0.26", default-features = false }
+# VNC sessions (RFB client, incl. macOS account login)
+vnc-rs = "0.6"
 
 # Window
 winit = { version = "0.30", features = ["rwh_06"] }

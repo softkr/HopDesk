@@ -12,12 +12,13 @@ use uuid::Uuid;
 
 use super::sessions::{Sessions, State};
 use super::{Launcher, Nav, theme};
-use crate::profile::{JumpHost, Profile, ProfileStore, RdpTarget};
+use crate::profile::{JumpHost, Profile, ProfileStore, Protocol, Target};
 
 fn profile(name: &str, jump: &str, target: &str, user: &str, key: bool) -> Profile {
     Profile {
         id: Uuid::new_v4(),
         name: name.into(),
+        protocol: Protocol::Rdp,
         use_jump: true,
         jump: JumpHost {
             host: jump.into(),
@@ -25,11 +26,12 @@ fn profile(name: &str, jump: &str, target: &str, user: &str, key: bool) -> Profi
             user: "ubuntu".into(),
             key_path: key.then(|| PathBuf::from("/Users/me/.ssh/id_ed25519")),
         },
-        target: RdpTarget {
+        target: Target {
             host: target.into(),
             port: 3389,
             user: user.into(),
             domain: (user == "hong").then(|| "CORP".into()),
+            key_path: None,
         },
         width: 1920,
         height: 1080,
@@ -93,7 +95,7 @@ fn screenshots() {
     shot(&mut h, "02-detail-idle");
 
     // 3. Connecting (dark)
-    sessions.set_for_test(ids[0], State::Rdp, vec!["INFO SSH jump host authenticated".into()]);
+    sessions.set_for_test(ids[0], State::Remote, vec!["INFO SSH jump host authenticated".into()]);
     let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(profiles.clone()), sessions.clone()), true);
     shot(&mut h, "03-connecting-dark");
 
@@ -133,11 +135,40 @@ fn screenshots() {
     direct.use_jump = false;
     let direct_id = direct.id;
     let sessions = Sessions::default();
-    sessions.set_for_test(direct_id, State::Rdp, vec![]);
+    sessions.set_for_test(direct_id, State::Remote, vec![]);
     let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![direct]), sessions), false);
     shot(&mut h, "08-direct-connecting");
     h.state_mut().apply_nav(Nav::Edit(direct_id));
     shot(&mut h, "09-direct-edit");
+
+    // SSH terminal profile: detail while connected (dark), then its edit form
+    let mut ssh = profile("빌드 서버 셸", "bastion.example.com", "10.20.1.30", "ubuntu", false);
+    ssh.protocol = Protocol::Ssh;
+    ssh.target.port = 22;
+    ssh.target.domain = None;
+    ssh.target.key_path = Some(PathBuf::from("/Users/me/.ssh/id_ed25519"));
+    let ssh_id = ssh.id;
+    let sessions = Sessions::default();
+    sessions.set_for_test(ssh_id, State::Connected, vec![]);
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![ssh.clone()]), sessions), true);
+    shot(&mut h, "12-ssh-connected-dark");
+    // Without the jump host, so the SSH target section is in view.
+    ssh.use_jump = false;
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![ssh]), Sessions::default()), true);
+    h.state_mut().apply_nav(Nav::Edit(ssh_id));
+    shot(&mut h, "13-ssh-edit-dark");
+
+    // VNC without the jump host: detail with the unencrypted warning, then its edit form
+    let mut vnc = profile("디자인 Mac", "", "mac.example.com", "", false);
+    vnc.protocol = Protocol::Vnc;
+    vnc.use_jump = false;
+    vnc.target.port = 5900;
+    vnc.target.domain = None;
+    let vnc_id = vnc.id;
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![vnc]), Sessions::default()), false);
+    shot(&mut h, "14-vnc-direct");
+    h.state_mut().apply_nav(Nav::Edit(vnc_id));
+    shot(&mut h, "15-vnc-direct-edit");
 
     // 10. Update offered in the sidebar
     let h_launcher = Launcher::with_store(ProfileStore::from_profiles(sample()), Sessions::default());

@@ -1,4 +1,4 @@
-SSH 점프 호스트를 거쳐 Windows PC에 원격 데스크톱(RDP)으로 접속하는 앱입니다.
+SSH 점프 호스트를 거쳐 Windows PC에 원격 데스크톱(RDP)으로, 서버에 SSH 터미널로, Mac·Linux 데스크톱에 화면 공유(VNC)로 접속하는 앱입니다.
 
 ## 다운로드
 

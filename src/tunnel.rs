@@ -1,15 +1,14 @@
-//! SSH jump host tunnel: one SSH session, one `direct-tcpip` channel per RDP connection attempt.
+//! SSH jump host tunnel: one SSH session, one `direct-tcpip` channel per connection attempt to the target.
 
-use core::net::SocketAddr;
 use core::time::Duration;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, ensure};
-use ironrdp_client::config::BoxedRdpStream;
 use russh::client::{self, Handle};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_secret_key};
+use tokio::io::DuplexStream;
 use tracing::{error, info, warn};
 
 use crate::trust::{Kind, TrustStore, Verdict};
@@ -23,9 +22,29 @@ pub struct JumpParams {
     pub secret: Option<String>,
 }
 
-struct HostKeyVerifier {
+/// Which SSH server a host key belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Jump,
+    /// The remote host of an SSH profile.
+    Target,
+}
+
+/// Pins the server's host key on first use and refuses a changed one.
+pub struct HostKeyVerifier {
     host_port: String,
     trust: Arc<TrustStore>,
+    role: Role,
+}
+
+impl HostKeyVerifier {
+    pub fn new(host: &str, port: u16, trust: Arc<TrustStore>, role: Role) -> Self {
+        Self {
+            host_port: format!("{host}:{port}"),
+            trust,
+            role,
+        }
+    }
 }
 
 impl client::Handler for HostKeyVerifier {
@@ -40,15 +59,59 @@ impl client::Handler for HostKeyVerifier {
                 Ok(true)
             }
             Verdict::Mismatch { pinned } => {
-                error!(
-                    host = %self.host_port, %fingerprint, %pinned,
-                    "SSH HOST KEY CHANGED - possible man-in-the-middle; refusing to connect \
-                     (run `hopdesk forget <host>` if the change is legitimate)"
-                );
+                // The launcher tells the two apart by these messages.
+                match self.role {
+                    Role::Jump => error!(
+                        host = %self.host_port, %fingerprint, %pinned,
+                        "SSH HOST KEY CHANGED - possible man-in-the-middle; refusing to connect \
+                         (run `hopdesk forget <host>` if the change is legitimate)"
+                    ),
+                    Role::Target => error!(
+                        host = %self.host_port, %fingerprint, %pinned,
+                        "TARGET SSH HOST KEY CHANGED - possible man-in-the-middle; refusing to connect \
+                         (run `hopdesk forget <host>` if the change is legitimate)"
+                    ),
+                }
                 Ok(false)
             }
         }
     }
+}
+
+/// SSH client settings shared by the jump host and SSH sessions.
+pub fn client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        // Input and frame acknowledgements are small packets; Nagle would delay them.
+        nodelay: true,
+        ..Default::default()
+    })
+}
+
+/// How to log on to an SSH server.
+pub enum Credential<'a> {
+    Key { path: &'a Path, passphrase: Option<&'a str> },
+    Password(&'a str),
+}
+
+/// Authenticates `user`; `Ok(false)` when the server rejects the credential.
+pub async fn authenticate(
+    handle: &mut Handle<HostKeyVerifier>,
+    user: &str,
+    credential: Credential<'_>,
+) -> anyhow::Result<bool> {
+    let result = match credential {
+        Credential::Key { path, passphrase } => {
+            let key = load_secret_key(path, passphrase).with_context(|| format!("load private key {}", path.display()))?;
+            let hash = handle.best_supported_rsa_hash().await?.flatten();
+            handle
+                .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+                .await?
+        }
+        Credential::Password(password) => handle.authenticate_password(user, password).await?,
+    };
+    Ok(result.success())
 }
 
 pub struct Tunnel {
@@ -68,38 +131,22 @@ impl Tunnel {
 
     async fn connect_ssh(&self) -> anyhow::Result<Handle<HostKeyVerifier>> {
         let p = &self.params;
-        let config = Arc::new(client::Config {
-            inactivity_timeout: None,
-            keepalive_interval: Some(Duration::from_secs(30)),
-            // Input and frame acknowledgements are small packets; Nagle would delay them.
-            nodelay: true,
-            ..Default::default()
-        });
-        let verifier = HostKeyVerifier {
-            host_port: format!("{}:{}", p.host, p.port),
-            trust: Arc::clone(&self.trust),
-        };
+        let verifier = HostKeyVerifier::new(&p.host, p.port, Arc::clone(&self.trust), Role::Jump);
 
         info!(host = %p.host, port = p.port, user = %p.user, "Connecting to SSH jump host");
-        let mut handle = client::connect(config, (p.host.as_str(), p.port), verifier)
+        let mut handle = client::connect(client_config(), (p.host.as_str(), p.port), verifier)
             .await
             .context("SSH connect to jump host")?;
 
-        let result = if let Some(key_path) = &p.key_path {
-            let key = load_secret_key(key_path, p.secret.as_deref())
-                .with_context(|| format!("load private key {}", key_path.display()))?;
-            let hash = handle.best_supported_rsa_hash().await?.flatten();
-            handle
-                .authenticate_publickey(&p.user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
-                .await?
-        } else {
-            let password = p
-                .secret
-                .as_deref()
-                .context("no stored jump host password (use `set-password --jump`)")?;
-            handle.authenticate_password(&p.user, password).await?
+        let credential = match &p.key_path {
+            Some(path) => Credential::Key { path, passphrase: p.secret.as_deref() },
+            None => Credential::Password(
+                p.secret
+                    .as_deref()
+                    .context("no stored jump host password (use `set-password --jump`)")?,
+            ),
         };
-        ensure!(result.success(), "jump host authentication failed");
+        ensure!(authenticate(&mut handle, &p.user, credential).await?, "jump host authentication failed");
 
         info!("SSH jump host authenticated");
         Ok(handle)
@@ -116,8 +163,8 @@ impl Tunnel {
 
     /// Opens a `direct-tcpip` channel from the jump host to `host:port`.
     ///
-    /// Re-establishes the SSH session when it was closed, so RDP auto-reconnect keeps working.
-    pub async fn open(&self, host: &str, port: u16) -> io::Result<(BoxedRdpStream, SocketAddr)> {
+    /// Re-establishes the SSH session when it was closed, so auto-reconnect keeps working.
+    pub async fn open(&self, host: &str, port: u16) -> io::Result<DuplexStream> {
         let mut guard = self.handle.lock().await;
         if guard.as_ref().is_none_or(|h| h.is_closed()) {
             *guard = Some(self.connect_ssh().await.map_err(|e| io::Error::other(format!("{e:#}")))?);
@@ -130,7 +177,7 @@ impl Tunnel {
             .await
             .map_err(|e| io::Error::other(format!("open direct-tcpip channel to {host}:{port}: {e}")))?;
 
-        // Bridge through an in-memory duplex so the engine gets a `Send + Sync` stream.
+        // Bridge through an in-memory duplex so callers get a `Send + Sync` stream.
         let mut channel_stream = channel.into_stream();
         let (near, mut far) = tokio::io::duplex(256 * 1024);
         tokio::spawn(async move {
@@ -139,7 +186,6 @@ impl Tunnel {
             }
         });
 
-        // The real client address is the jump host's; RDP only uses this for Client Info.
-        Ok((Box::new(near), SocketAddr::from(([127, 0, 0, 1], 0))))
+        Ok(near)
     }
 }

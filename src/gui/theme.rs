@@ -94,7 +94,7 @@ impl Bold for egui::RichText {
 
 /// Uses the OS Korean UI font (Apple SD Gothic Neo, Malgun Gothic, Noto Sans CJK) for Latin and
 /// Hangul alike, so weights match. Without one, egui's bundled font is used and bold maps to regular.
-fn install_fonts(ctx: &egui::Context) {
+pub(crate) fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let mut bold = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     if let Some(font) = super::platform::ui_font() {
@@ -116,6 +116,10 @@ fn install_fonts(ctx: &egui::Context) {
                 .insert("ui-bold".into(), egui::FontData::from_blob(semibold, font.bold.1).into());
             if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
                 list.insert(0, "ui-regular".into());
+            }
+            // Hangul in the terminal; Latin stays in the monospace font.
+            if let Some(list) = fonts.families.get_mut(&FontFamily::Monospace) {
+                list.push("ui-regular".into());
             }
             bold.insert(0, "ui-bold".into());
         }

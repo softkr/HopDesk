@@ -10,11 +10,11 @@ pub const PREFIX: &str = "@hopdesk ";
 pub enum Phase {
     /// Connecting / authenticating to the SSH jump host.
     Ssh,
-    /// SSH is up; RDP connection sequence in progress.
-    Rdp,
-    /// RDP connected (desktop window is showing).
+    /// SSH is up; connection to the target (RDP, SSH, VNC) in progress.
+    Remote,
+    /// Connected to the target (session window is showing).
     Connected,
-    /// Windows logon finished.
+    /// Logon on the target finished.
     LoggedIn,
     /// Connection dropped, auto-reconnect in progress.
     Reconnecting,
@@ -28,7 +28,7 @@ impl Phase {
     fn as_str(self) -> &'static str {
         match self {
             Phase::Ssh => "ssh",
-            Phase::Rdp => "rdp",
+            Phase::Remote => "remote",
             Phase::Connected => "connected",
             Phase::LoggedIn => "logged-in",
             Phase::Reconnecting => "reconnecting",
@@ -40,7 +40,8 @@ impl Phase {
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "ssh" => Phase::Ssh,
-            "rdp" => Phase::Rdp,
+            // `rdp`: the name used before other protocols existed.
+            "remote" | "rdp" => Phase::Remote,
             "connected" => Phase::Connected,
             "logged-in" => Phase::LoggedIn,
             "reconnecting" => Phase::Reconnecting,
@@ -66,4 +67,15 @@ pub fn parse(line: &str) -> Option<(Phase, String)> {
     let rest = line.strip_prefix(PREFIX)?;
     let (phase, detail) = rest.split_once('\t').unwrap_or((rest, ""));
     Some((Phase::parse(phase)?, detail.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_phase_round_trips_and_accepts_the_old_name() {
+        assert_eq!(Phase::parse(Phase::Remote.as_str()), Some(Phase::Remote));
+        assert_eq!(parse("@hopdesk rdp\t"), Some((Phase::Remote, String::new())));
+    }
 }

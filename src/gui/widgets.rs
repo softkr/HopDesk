@@ -297,6 +297,8 @@ pub enum Icon {
     Laptop,
     Gateway,
     Monitor,
+    /// A terminal window with a prompt (SSH targets).
+    Terminal,
     Check,
     Plus,
     Ellipsis,
@@ -331,6 +333,11 @@ pub fn paint_icon(painter: &egui::Painter, icon: Icon, center: egui::Pos2, size:
             painter.rect_stroke(r(-0.40, -0.32, 0.40, 0.18), CornerRadius::same(2), stroke, egui::StrokeKind::Middle);
             painter.line_segment([p(0.0, 0.18), p(0.0, 0.32)], stroke);
             painter.line_segment([p(-0.18, 0.34), p(0.18, 0.34)], stroke);
+        }
+        Icon::Terminal => {
+            painter.rect_stroke(r(-0.40, -0.32, 0.40, 0.32), CornerRadius::same(3), stroke, egui::StrokeKind::Middle);
+            painter.add(egui::Shape::line(vec![p(-0.24, -0.12), p(-0.08, 0.0), p(-0.24, 0.12)], stroke));
+            painter.line_segment([p(0.02, 0.14), p(0.24, 0.14)], stroke);
         }
         Icon::Check => {
             painter.add(egui::Shape::line(vec![p(-0.30, 0.0), p(-0.08, 0.22), p(0.32, -0.20)], stroke));

@@ -1,13 +1,13 @@
 //! Launcher window (`hopdesk` without arguments): connection list, details, add/edit.
 //!
-//! Each connection runs as a child process (`hopdesk connect <name>`): the RDP viewer owns its own
-//! winit event loop, and winit allows only one event loop per process.
+//! Each connection runs as a child process (`hopdesk connect <name>`): the session window (RDP
+//! viewer or SSH terminal) owns its own winit event loop, and winit allows only one per process.
 
 mod detail;
 mod form;
 mod platform;
 mod sessions;
-mod theme;
+pub(crate) mod theme;
 #[cfg(any(target_os = "macos", windows))]
 mod tray;
 mod widgets;
@@ -30,11 +30,19 @@ use crate::profile::{Profile, ProfileStore};
 use crate::trust::TrustStore;
 use crate::update::{self, Release};
 
+/// What the target of a profile is called in the UI: "원격 PC" (desktop) or "원격 서버" (SSH).
+fn target_noun(protocol: crate::profile::Protocol) -> &'static str {
+    match protocol {
+        crate::profile::Protocol::Ssh => "원격 서버",
+        _ => "원격 PC",
+    }
+}
+
 /// macOS draws icons on Apple's grid (with margin); elsewhere the tile fills the square.
 #[cfg(target_os = "macos")]
-const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-256.png");
+pub(crate) const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-256.png");
 #[cfg(not(target_os = "macos"))]
-const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-full-256.png");
+pub(crate) const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-full-256.png");
 
 /// How often a running launcher looks for a newer release (it may stay in the menu bar for days).
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -335,9 +343,9 @@ impl Launcher {
     // --- actions ------------------------------------------------------------------------------
 
     fn connect(&mut self, ctx: &egui::Context, id: Uuid) {
-        let Some(name) = self.profile(id).map(|p| p.name.clone()) else { return };
+        let Some((name, protocol)) = self.profile(id).map(|p| (p.name.clone(), p.protocol)) else { return };
         self.sessions.dismiss(id);
-        if let Err(e) = self.sessions.start(id, &name, ctx) {
+        if let Err(e) = self.sessions.start(id, &name, protocol, ctx) {
             self.toast(ctx, ToastKind::Error, format!("연결을 시작하지 못했습니다: {e:#}"));
         }
     }
@@ -621,7 +629,7 @@ impl Launcher {
                 ui.label(RichText::new("첫 연결을 만들어 보세요").size(theme::HEADING_SIZE).bold().color(pal.text));
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new(format!("SSH 점프 호스트를 거쳐 원격 Windows PC에 안전하게 접속합니다.\n비밀번호는 {}에 저장됩니다.", platform::SECRET_STORE))
+                    RichText::new(format!("SSH 점프 호스트를 거쳐 원격 PC나 서버에 안전하게 접속합니다.\n비밀번호는 {}에 저장됩니다.", platform::SECRET_STORE))
                         .line_height(Some(22.0))
                         .color(pal.text_weak),
                 );
@@ -852,7 +860,11 @@ fn list_row(ui: &mut Ui, pal: &Palette, p: &Profile, selected: bool, state: Opti
     let max_w = (text_right - text_left).max(20.0);
 
     let name = single_line(ui, &p.name, FontId::new(14.0, bold_family()), pal.text, max_w);
-    let sub_text = format!("{}@{}", p.target.user, p.target.host);
+    // A VNC profile without a user logs on with the VNC password.
+    let sub_text = match p.target.user.as_str() {
+        "" => p.target.host.clone(),
+        user => format!("{user}@{}", p.target.host),
+    };
     let sub = single_line(ui, &sub_text, FontId::proportional(13.0), pal.text_weak, max_w);
     let total = name.size().y + 2.0 + sub.size().y;
     let top = rect.center().y - total / 2.0;

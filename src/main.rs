@@ -4,9 +4,11 @@
 //! hopdesk                (no arguments: profile manager window)
 //! hopdesk add <name> [--jump user@bastion[:22] [--jump-key ~/.ssh/id_ed25519]]
 //!                        --target 10.0.0.5[:3389] --user Administrator [--domain CORP]
+//! hopdesk add <name> --protocol ssh [--jump ...] --target 10.0.0.7[:22] --user me [--key ~/.ssh/id_ed25519]
+//! hopdesk add <name> --protocol vnc [--jump ... [--user <macOS account>]] --target 10.0.0.9[:5900]
 //! hopdesk list
 //! hopdesk connect <name>
-//! hopdesk set-password <name> --jump | --rdp
+//! hopdesk set-password <name> --jump | --target
 //! hopdesk remove <name>
 //! hopdesk forget <host>
 //! ```
@@ -29,6 +31,7 @@ mod secret_store;
 mod session;
 mod shared_folder;
 mod status;
+mod terminal;
 mod trust;
 mod tunnel;
 mod update;
@@ -41,7 +44,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, bail};
 use clap::{Args, Parser, Subcommand};
 
-use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, RdpTarget, Secret};
+use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, Protocol, Secret, Target};
 use crate::trust::TrustStore;
 use crate::tunnel::{JumpParams, Tunnel};
 
@@ -66,7 +69,8 @@ enum Command {
         name: String,
         #[arg(long, conflicts_with = "rdp", required_unless_present = "rdp")]
         jump: bool,
-        #[arg(long)]
+        /// Password on the target (or its key passphrase); `--rdp` is the older name.
+        #[arg(long, visible_alias = "target")]
         rdp: bool,
     },
     /// Connect using a profile (automatic login with the stored credentials).
@@ -90,15 +94,21 @@ struct AddArgs {
     /// Private key for the jump host (password authentication when omitted).
     #[arg(long)]
     jump_key: Option<PathBuf>,
-    /// RDP target as seen from the jump host, `host[:port]`.
+    #[arg(long, value_enum, default_value_t)]
+    protocol: Protocol,
+    /// Target as seen from the jump host, `host[:port]` (default port by protocol).
     #[arg(long)]
     target: String,
-    /// RDP user name.
+    /// User name on the target. VNC: a macOS account (through the jump host only); without it
+    /// the VNC password is used.
     #[arg(long)]
-    user: String,
-    /// RDP domain.
+    user: Option<String>,
+    /// Windows domain (RDP).
     #[arg(long)]
     domain: Option<String>,
+    /// Private key for the target (SSH; password authentication when omitted).
+    #[arg(long)]
+    key: Option<PathBuf>,
     #[arg(long, default_value_t = 1920)]
     width: u16,
     #[arg(long, default_value_t = 1080)]
@@ -128,7 +138,7 @@ fn main() -> anyhow::Result<()> {
         Command::List => list(),
         Command::Remove { name } => remove(&name),
         Command::SetPassword { name, jump, .. } => {
-            set_password(&name, if jump { Secret::Jump } else { Secret::Rdp })
+            set_password(&name, if jump { Secret::Jump } else { Secret::Target })
         }
         Command::Connect { name, screen } => connect(&name, screen).inspect_err(|e| status::emit(status::Phase::Failed, &format!("{e:#}"))),
         Command::Forget { host } => {
@@ -140,6 +150,21 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn add(args: AddArgs) -> anyhow::Result<()> {
+    if args.domain.is_some() && args.protocol != Protocol::Rdp {
+        bail!("--domain applies to RDP only");
+    }
+    if args.key.is_some() && args.protocol != Protocol::Ssh {
+        bail!("--key applies to SSH only");
+    }
+    let user = match (args.user, args.protocol) {
+        (Some(user), _) => user,
+        (None, Protocol::Vnc) => String::new(),
+        (None, _) => bail!("--user is required"),
+    };
+    // A macOS account password must not cross the network without the SSH channel.
+    if args.protocol == Protocol::Vnc && !user.is_empty() && args.jump.is_none() {
+        bail!("a macOS account (--user) needs --jump; without it the VNC password is used");
+    }
     let mut store = ProfileStore::load()?;
     let jump = match &args.jump {
         Some(jump) => {
@@ -153,18 +178,20 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
         }
         None => JumpHost::unset(),
     };
-    let (target_host, target_port) = parse_host_port(&args.target, 3389)?;
+    let (target_host, target_port) = parse_host_port(&args.target, args.protocol.default_port())?;
 
     let profile = Profile {
         id: uuid::Uuid::new_v4(),
         name: args.name,
+        protocol: args.protocol,
         use_jump: args.jump.is_some(),
         jump,
-        target: RdpTarget {
+        target: Target {
             host: target_host,
             port: target_port,
-            user: args.user,
+            user,
             domain: args.domain,
+            key_path: args.key,
         },
         width: args.width,
         height: args.height,
@@ -175,7 +202,7 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
     if profile.use_jump {
         prompt_and_store(&profile, Secret::Jump)?;
     }
-    prompt_and_store(&profile, Secret::Rdp)?;
+    prompt_and_store(&profile, Secret::Target)?;
     store.save()?;
     println!("added profile `{}`", profile.name);
     Ok(())
@@ -193,11 +220,16 @@ fn list() -> anyhow::Result<()> {
         } else {
             "direct".to_owned()
         };
+        // A VNC profile without a user logs on with the VNC password only.
+        let account = match (&p.target.domain, p.target.user.as_str()) {
+            (_, "") => String::new(),
+            (Some(domain), user) => format!("{domain}\\{user}@"),
+            (None, user) => format!("{user}@"),
+        };
         println!(
-            "{:<16} {route} -> {}{}@{}:{}",
+            "{:<16} {:<4} {route} -> {account}{}:{}",
             p.name,
-            p.target.domain.as_deref().map(|d| format!("{d}\\")).unwrap_or_default(),
-            p.target.user,
+            protocol_name(p.protocol),
             p.target.host,
             p.target.port,
         );
@@ -226,9 +258,7 @@ fn connect(name: &str, screen: Option<(u16, u16)>) -> anyhow::Result<()> {
     let profile = store.get(name)?.clone();
     let trust = Arc::new(TrustStore::load()?);
 
-    let rdp_password = profile
-        .secret(Secret::Rdp)?
-        .context("no stored RDP password (use `set-password --rdp`)")?;
+    let password = profile.secret(Secret::Target)?;
 
     let tunnel = if profile.use_jump {
         let jump_secret = profile.secret(Secret::Jump)?.filter(|s| !s.is_empty());
@@ -246,20 +276,45 @@ fn connect(name: &str, screen: Option<(u16, u16)>) -> anyhow::Result<()> {
         None
     };
 
-    session::run(&profile, screen, rdp_password, tunnel, trust)
+    session::run(&profile, screen, password, tunnel, trust)
 }
 
 fn prompt_and_store(profile: &Profile, which: Secret) -> anyhow::Result<()> {
-    let prompt = match (which, profile.jump.key_path.is_some()) {
-        (Secret::Jump, false) => format!("Jump host password for {}@{}: ", profile.jump.user, profile.jump.host),
-        (Secret::Jump, true) => "Private key passphrase (empty if none): ".to_owned(),
-        (Secret::Rdp, _) => format!("RDP password for {}@{}: ", profile.target.user, profile.target.host),
+    let key_based = match which {
+        Secret::Jump => profile.jump.key_path.is_some(),
+        Secret::Target => profile.target.key_path.is_some(),
+    };
+    let prompt = match which {
+        _ if key_based => "Private key passphrase (empty if none): ".to_owned(),
+        Secret::Jump => format!("Jump host password for {}@{}: ", profile.jump.user, profile.jump.host),
+        Secret::Target if profile.protocol == Protocol::Vnc && profile.target.user.is_empty() => {
+            format!("VNC password for {} (empty if none): ", profile.target.host)
+        }
+        Secret::Target if profile.protocol == Protocol::Vnc => {
+            format!("macOS password for {}@{}: ", profile.target.user, profile.target.host)
+        }
+        Secret::Target => format!(
+            "{} password for {}@{}: ",
+            protocol_name(profile.protocol).to_uppercase(),
+            profile.target.user,
+            profile.target.host
+        ),
     };
     let value = rpassword::prompt_password(prompt)?;
-    if value.is_empty() && !(which == Secret::Jump && profile.jump.key_path.is_some()) {
+    // A VNC server may ask for no password at all.
+    let optional = key_based || (which == Secret::Target && profile.protocol == Protocol::Vnc && profile.target.user.is_empty());
+    if value.is_empty() && !optional {
         bail!("password must not be empty");
     }
     profile.set_secret(which, &value)
+}
+
+fn protocol_name(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Rdp => "rdp",
+        Protocol::Ssh => "ssh",
+        Protocol::Vnc => "vnc",
+    }
 }
 
 fn parse_host_port(s: &str, default_port: u16) -> anyhow::Result<(String, u16)> {
