@@ -10,6 +10,7 @@ HopDesk가 SSH 터널을 열고 저장된 계정으로 Windows에 자동 로그�
 ## 주요 기능
 
 - **한 번에 접속:** 점프 호스트 SSH 로그인부터 Windows 로그인까지 자동으로 처리합니다.
+- **내장 VPN (WireGuard):** 연결의 **접속 경로**를 **VPN (WireGuard)** 로 고르면 HopDesk가 앱 안에서 직접 WireGuard 터널을 열어 사내망에 접속합니다. 관리자 권한이나 가상 네트워크 장치가 필요 없고, 이 연결에만 VPN을 쓰므로 이 기기의 다른 앱과 라우팅에는 영향이 없습니다. 서버가 준 `wg-quick` 설정 파일(`.conf`)을 **가져오기**로 불러오거나 직접 입력하며, 이 기기의 개인키는 운영체제 보안 저장소에만 보관합니다. VPN 안의 대상은 **IP 주소**로 입력합니다(VPN 안에서는 이름을 조회하지 않습니다). 사전 공유 키(PresharedKey)·DNS 설정은 지원하지 않으며, 점프 호스트와 함께 쓸 수는 없습니다. VNC는 VPN 안에서 암호화되므로 macOS 계정 로그인도 쓸 수 있습니다.
 - **SSH 터미널:** 연결 종류를 **터미널 (SSH)** 로 고르면 원격 서버의 셸이 HopDesk 터미널 창에서 열립니다. 점프 호스트를 거칠 수 있고, 비밀번호나 개인 키로 로그인합니다. 한글 입력, 256색·트루컬러, 드래그로 선택 후 복사(macOS ⌘C, Windows·Linux는 선택한 상태에서 Ctrl+C), 붙여넣기(⌘V / Ctrl+V), 스크롤백을 지원합니다. 원격 프로그램이 이 기기의 클립보드에 쓰는 기능(OSC 52)은 막아 둡니다.
 - **화면 공유 (VNC):** macOS 화면 공유, TigerVNC·x11vnc 같은 VNC 서버에 접속합니다. VNC 비밀번호로 로그인하거나, **점프 호스트를 거칠 때만** macOS 계정으로 로그인할 수 있습니다(macOS 계정 로그인 방식은 서버를 확인하지 않아, 중간에서 가로채면 계정 비밀번호가 드러나기 때문입니다). 키는 키보드 위치 기준으로 보내므로 한글은 원격 쪽 입력기로 칩니다. 텍스트 클립보드를 주고받습니다(⌘V / Ctrl+V는 로컬 클립보드를 원격으로 보낸 뒤 붙여넣습니다). 점프 호스트 없이 접속하면 화면과 키 입력이 암호화되지 않으므로 연결 화면에 경고를 표시합니다.
   - macOS를 VNC 비밀번호로 접속하려면 원격 Mac의 **시스템 설정 → 일반 → 공유 → 화면 공유 → (i)** 에서 **VNC 사용자가 암호로 화면을 제어할 수 있음**을 켭니다.
@@ -95,6 +96,8 @@ hopdesk add build --protocol ssh --jump ubuntu@bastion.example.com \
     --target 10.0.0.7 --user ubuntu --key ~/.ssh/id_ed25519   # SSH 터미널 (포트 기본값 22)
 hopdesk add design --protocol vnc --jump ubuntu@bastion.example.com \
     --target 10.0.0.9 --user hong   # 화면 공유: macOS 계정 (--user 없이: VNC 비밀번호, 포트 기본값 5900)
+hopdesk add lab --vpn-config ~/Downloads/wg0.conf \
+    --target 10.8.0.5:3389 --user hong   # 내장 VPN (--jump와 함께 쓸 수 없음)
 hopdesk list
 hopdesk connect office
 hopdesk set-password office --target  # 저장된 비밀번호 변경 (--jump: 점프 호스트)

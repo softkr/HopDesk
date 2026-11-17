@@ -17,6 +17,10 @@ ironrdp-rdpdr-native = { path = "third_party/IronRDP/crates/ironrdp-rdpdr-native
 
 # SSH jump host and SSH sessions
 russh = "0.65"
+# Userspace WireGuard VPN: the protocol (no TUN device, no root) and the TCP/IP stack on top of it
+boringtun = { version = "0.7", default-features = false }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
+base64 = "0.22"
 # Terminal emulation for SSH sessions (rendered with egui)
 alacritty_terminal = { version = "0.26", default-features = false }
 # VNC sessions (RFB client, incl. macOS account login)

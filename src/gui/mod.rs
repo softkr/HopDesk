@@ -30,6 +30,22 @@ use crate::profile::{Profile, ProfileStore};
 use crate::trust::TrustStore;
 use crate::update::{self, Release};
 
+/// Protocol and route of a profile in a few characters, e.g. `SSH · VPN 경유`.
+fn kind_tag(profile: &Profile) -> String {
+    let protocol = match profile.protocol {
+        crate::profile::Protocol::Rdp => "RDP",
+        crate::profile::Protocol::Ssh => "SSH",
+        crate::profile::Protocol::Vnc => "VNC",
+    };
+    if profile.vpn.is_some() {
+        format!("{protocol} · VPN 경유")
+    } else if profile.use_jump {
+        format!("{protocol} · 점프 호스트 경유")
+    } else {
+        protocol.to_owned()
+    }
+}
+
 /// What the target of a profile is called in the UI: "원격 PC" (desktop) or "원격 서버" (SSH).
 fn target_noun(protocol: crate::profile::Protocol) -> &'static str {
     match protocol {
@@ -336,6 +352,7 @@ impl Launcher {
                     || [&p.name, &p.target.host, &p.target.user, &p.jump.host]
                         .iter()
                         .any(|s| s.to_lowercase().contains(&q))
+                    || p.vpn.as_ref().is_some_and(|vpn| vpn.endpoint.to_lowercase().contains(&q))
             })
             .collect()
     }
@@ -629,7 +646,7 @@ impl Launcher {
                 ui.label(RichText::new("첫 연결을 만들어 보세요").size(theme::HEADING_SIZE).bold().color(pal.text));
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new(format!("SSH 점프 호스트를 거쳐 원격 PC나 서버에 안전하게 접속합니다.\n비밀번호는 {}에 저장됩니다.", platform::SECRET_STORE))
+                    RichText::new(format!("SSH 점프 호스트나 VPN을 거쳐 원격 PC나 서버에 안전하게 접속합니다.\n비밀번호는 {}에 저장됩니다.", platform::SECRET_STORE))
                         .line_height(Some(22.0))
                         .color(pal.text_weak),
                 );
@@ -861,9 +878,11 @@ fn list_row(ui: &mut Ui, pal: &Palette, p: &Profile, selected: bool, state: Opti
 
     let name = single_line(ui, &p.name, FontId::new(14.0, bold_family()), pal.text, max_w);
     // A VNC profile without a user logs on with the VNC password.
+    let protocol = kind_tag(p);
+    let protocol = protocol.split(' ').next().unwrap_or_default();
     let sub_text = match p.target.user.as_str() {
-        "" => p.target.host.clone(),
-        user => format!("{user}@{}", p.target.host),
+        "" => format!("{protocol} · {}", p.target.host),
+        user => format!("{protocol} · {user}@{}", p.target.host),
     };
     let sub = single_line(ui, &sub_text, FontId::proportional(13.0), pal.text_weak, max_w);
     let total = name.size().y + 2.0 + sub.size().y;

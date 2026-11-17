@@ -220,6 +220,7 @@ mod tests {
             protocol: Protocol::Ssh,
             use_jump: jump,
             jump: JumpHost::unset(),
+            vpn: None,
             target: Target {
                 host: host.clone(),
                 port,
@@ -232,7 +233,7 @@ mod tests {
             display: DisplayMode::Fixed,
         };
         let tunnel = jump.then(|| {
-            Tunnel::new(
+            Tunnel::jump(
                 JumpParams {
                     host: host.clone(),
                     port,

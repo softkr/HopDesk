@@ -35,6 +35,7 @@ mod terminal;
 mod trust;
 mod tunnel;
 mod update;
+mod vpn;
 
 use std::fs;
 use std::io::{IsTerminal as _, Write as _};
@@ -47,6 +48,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, Protocol, Secret, Target};
 use crate::trust::TrustStore;
 use crate::tunnel::{JumpParams, Tunnel};
+use crate::vpn::VpnParams;
 
 #[derive(Parser)]
 #[command(version, name = "hopdesk", about = "HopDesk - RDP client through an SSH jump host")]
@@ -94,6 +96,10 @@ struct AddArgs {
     /// Private key for the jump host (password authentication when omitted).
     #[arg(long)]
     jump_key: Option<PathBuf>,
+    /// WireGuard configuration file (`wg0.conf`): connect through the built-in VPN instead of a
+    /// jump host. The private key goes to the OS credential store, not to the profile.
+    #[arg(long, conflicts_with_all = ["jump", "jump_key"])]
+    vpn_config: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t)]
     protocol: Protocol,
     /// Target as seen from the jump host, `host[:port]` (default port by protocol).
@@ -161,10 +167,18 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
         (None, Protocol::Vnc) => String::new(),
         (None, _) => bail!("--user is required"),
     };
-    // A macOS account password must not cross the network without the SSH channel.
-    if args.protocol == Protocol::Vnc && !user.is_empty() && args.jump.is_none() {
-        bail!("a macOS account (--user) needs --jump; without it the VNC password is used");
+    // A macOS account password must not cross the network without the SSH channel or the VPN.
+    if args.protocol == Protocol::Vnc && !user.is_empty() && args.jump.is_none() && args.vpn_config.is_none() {
+        bail!("a macOS account (--user) needs --jump or --vpn-config; without it the VNC password is used");
     }
+    let vpn = args
+        .vpn_config
+        .as_deref()
+        .map(|path| {
+            let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+            vpn::parse_config(&text).with_context(|| format!("read {}", path.display()))
+        })
+        .transpose()?;
     let mut store = ProfileStore::load()?;
     let jump = match &args.jump {
         Some(jump) => {
@@ -186,6 +200,12 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
         protocol: args.protocol,
         use_jump: args.jump.is_some(),
         jump,
+        vpn: vpn.as_ref().map(|config| profile::Vpn {
+            endpoint: config.endpoint.clone(),
+            addresses: config.addresses.clone(),
+            peer_public_key: config.peer_public_key.clone(),
+            keepalive: config.keepalive,
+        }),
         target: Target {
             host: target_host,
             port: target_port,
@@ -202,6 +222,9 @@ fn add(args: AddArgs) -> anyhow::Result<()> {
     if profile.use_jump {
         prompt_and_store(&profile, Secret::Jump)?;
     }
+    if let Some(config) = &vpn {
+        profile.set_secret(Secret::Vpn, &config.private_key)?;
+    }
     prompt_and_store(&profile, Secret::Target)?;
     store.save()?;
     println!("added profile `{}`", profile.name);
@@ -214,7 +237,9 @@ fn list() -> anyhow::Result<()> {
         println!("no profiles (use `hopdesk add`)");
     }
     for p in store.profiles() {
-        let route = if p.use_jump {
+        let route = if let Some(vpn) = &p.vpn {
+            format!("vpn {}", vpn.endpoint)
+        } else if p.use_jump {
             let auth = if p.jump.key_path.is_some() { "key" } else { "password" };
             format!("{}@{}:{} ({auth})", p.jump.user, p.jump.host, p.jump.port)
         } else {
@@ -260,9 +285,21 @@ fn connect(name: &str, screen: Option<(u16, u16)>) -> anyhow::Result<()> {
 
     let password = profile.secret(Secret::Target)?;
 
-    let tunnel = if profile.use_jump {
+    let tunnel = if let Some(vpn) = &profile.vpn {
+        let private_key = profile
+            .secret(Secret::Vpn)?
+            .filter(|key| !key.is_empty())
+            .context("no stored VPN private key (edit the profile and enter the key again)")?;
+        Some(Tunnel::vpn(VpnParams {
+            endpoint: vpn.endpoint.clone(),
+            addresses: vpn.addresses.clone(),
+            peer_public_key: vpn.peer_public_key.clone(),
+            private_key,
+            keepalive: vpn.keepalive,
+        }))
+    } else if profile.use_jump {
         let jump_secret = profile.secret(Secret::Jump)?.filter(|s| !s.is_empty());
-        Some(Tunnel::new(
+        Some(Tunnel::jump(
             JumpParams {
                 host: profile.jump.host.clone(),
                 port: profile.jump.port,
@@ -283,8 +320,10 @@ fn prompt_and_store(profile: &Profile, which: Secret) -> anyhow::Result<()> {
     let key_based = match which {
         Secret::Jump => profile.jump.key_path.is_some(),
         Secret::Target => profile.target.key_path.is_some(),
+        Secret::Vpn => unreachable!("the VPN key is read from a file, never typed"),
     };
     let prompt = match which {
+        Secret::Vpn => unreachable!("the VPN key is read from a file, never typed"),
         _ if key_based => "Private key passphrase (empty if none): ".to_owned(),
         Secret::Jump => format!("Jump host password for {}@{}: ", profile.jump.user, profile.jump.host),
         Secret::Target if profile.protocol == Protocol::Vnc && profile.target.user.is_empty() => {

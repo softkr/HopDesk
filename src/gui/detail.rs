@@ -37,7 +37,14 @@ pub fn ui(
         card(ui, |ui| {
             route(ui, &pal, profile, state);
             ui.add_space(8.0);
-            status_area(ui, &pal, profile.protocol, state, &mut action);
+            let connecting = if profile.vpn.is_some() {
+                "VPN에 연결하는 중...".to_owned()
+            } else if profile.use_jump {
+                "점프 호스트에 연결하는 중...".to_owned()
+            } else {
+                format!("{}에 연결하는 중...", super::target_noun(profile.protocol))
+            };
+            status_area(ui, &pal, profile.protocol, &connecting, state, &mut action);
         });
         ui.add_space(12.0);
 
@@ -45,7 +52,11 @@ pub fn ui(
             widgets::section_title(ui, "연결 정보", None);
             egui::Grid::new("details").num_columns(2).min_row_height(20.0).spacing([28.0, 8.0]).show(ui, |ui| {
                 let j = &profile.jump;
-                if profile.use_jump {
+                if let Some(vpn) = &profile.vpn {
+                    widgets::info_row(ui, &pal, "VPN (WireGuard)", &vpn.endpoint);
+                    let addresses = vpn.addresses.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+                    widgets::info_row(ui, &pal, "VPN 주소", &addresses);
+                } else if profile.use_jump {
                     widgets::info_row(ui, &pal, "점프 호스트", &format!("{}@{}:{}", j.user, j.host, j.port));
                     let auth = match &j.key_path {
                         Some(path) => format!("개인 키 · {}", tilde(path)),
@@ -80,13 +91,15 @@ pub fn ui(
                     mode => mode.label().to_owned(),
                 };
                 widgets::info_row(ui, &pal, "해상도", &resolution);
-                ui.label("공유 폴더");
+                ui.label(RichText::new("공유 폴더").color(pal.text_weak));
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(tilde(shared_folder)).color(pal.text_weak));
-                    if ui.small_button("열기").clicked() {
+                    ui.label(RichText::new(tilde(shared_folder)).color(pal.text));
+                    // Quiet text buttons: the row is information first.
+                    let quiet = |text: &str| egui::Button::new(RichText::new(text).color(pal.accent)).frame_when_inactive(false).small();
+                    if ui.add(quiet("열기")).clicked() {
                         action = Action::OpenSharedFolder;
                     }
-                    if ui.small_button("변경…").clicked() {
+                    if ui.add(quiet("변경…")).clicked() {
                         action = Action::PickSharedFolder;
                     }
                 });
@@ -94,12 +107,12 @@ pub fn ui(
             });
         });
 
-        if profile.protocol == Protocol::Vnc && !profile.use_jump {
+        if profile.protocol == Protocol::Vnc && !profile.is_tunneled() {
             ui.add_space(12.0);
             widgets::banner(ui, pal.danger_soft, pal.danger.gamma_multiply(0.4), |ui| {
                 ui.label(RichText::new("암호화되지 않은 연결").bold().color(pal.danger));
                 ui.label(
-                    RichText::new("점프 호스트 없이 VNC로 접속하므로 화면과 키 입력이 네트워크에 그대로 보입니다.")
+                    RichText::new("점프 호스트나 VPN 없이 VNC로 접속하므로 화면과 키 입력이 네트워크에 그대로 보입니다.")
                         .color(pal.text),
                 );
             });
@@ -138,9 +151,10 @@ fn header(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, 
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.add(egui::Label::new(RichText::new(&profile.name).size(HEADING_SIZE).bold()).truncate());
+            let kind = super::kind_tag(profile);
             let sub = match account(profile).as_str() {
-                "" => profile.target.host.clone(),
-                account => format!("{account} · {}", profile.target.host),
+                "" => format!("{kind} · {}", profile.target.host),
+                account => format!("{kind} · {account} · {}", profile.target.host),
             };
             ui.label(RichText::new(sub).color(pal.text_weak));
         });
@@ -192,9 +206,13 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     };
 
     let jump_auth = if profile.jump.key_path.is_some() { "개인 키" } else { "비밀번호" };
+    let middle = match &profile.vpn {
+        Some(vpn) => ("VPN".to_owned(), vpn.endpoint.clone()),
+        None => ("점프 호스트".to_owned(), format!("{} · {jump_auth}", profile.jump.host)),
+    };
     let mut labels = vec![
         (Icon::Laptop, super::platform::THIS_DEVICE.to_owned(), "로컬".to_owned()),
-        (Icon::Gateway, "점프 호스트".to_owned(), format!("{} · {jump_auth}", profile.jump.host)),
+        (Icon::Gateway, middle.0, middle.1),
         (
             if profile.protocol == Protocol::Ssh { Icon::Terminal } else { Icon::Monitor },
             super::target_noun(profile.protocol).to_owned(),
@@ -202,7 +220,7 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
         ),
     ];
     let mut positions = vec![0.16, 0.5, 0.84];
-    if !profile.use_jump {
+    if !profile.is_tunneled() {
         // Direct connection: this device -> target. A failure before the session is the target's.
         labels.remove(1);
         positions = vec![0.25, 0.75];
@@ -312,7 +330,7 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
 /// Idle, connecting and connected share one height so the cards below do not jump between states.
 const STATUS_HEIGHT: f32 = 84.0;
 
-fn status_area(ui: &mut Ui, pal: &Palette, protocol: Protocol, state: Option<&State>, action: &mut Action) {
+fn status_area(ui: &mut Ui, pal: &Palette, protocol: Protocol, connecting: &str, state: Option<&State>, action: &mut Action) {
     if let Some(State::Failed(info)) = state {
         failure(ui, pal, info, action);
         return;
@@ -322,10 +340,12 @@ fn status_area(ui: &mut Ui, pal: &Palette, protocol: Protocol, state: Option<&St
         ui.set_min_height(STATUS_HEIGHT);
         match state {
             None => {
-                ui.add_space((STATUS_HEIGHT - 44.0) / 2.0);
+                ui.add_space(8.0);
                 if widgets::large_primary_button(ui, "연결", 220.0).on_hover_text("Enter").clicked() {
                     *action = Action::Connect;
                 }
+                ui.add_space(4.0);
+                ui.label(RichText::new("Enter 키로도 연결할 수 있습니다").small().color(pal.text_weak));
             }
             Some(State::Connected) => {
                 ui.add_space(2.0);
@@ -344,7 +364,7 @@ fn status_area(ui: &mut Ui, pal: &Palette, protocol: Protocol, state: Option<&St
                 let text = match state {
                     Some(State::Remote) => format!("{}에 로그인하는 중...", super::target_noun(protocol)),
                     Some(State::Reconnecting) => "연결이 끊겨 다시 연결하는 중...".to_owned(),
-                    _ => "점프 호스트에 연결하는 중...".to_owned(),
+                    _ => connecting.to_owned(),
                 };
                 ui.add_space(8.0);
                 progress_row(ui, pal, &text, "취소", action);

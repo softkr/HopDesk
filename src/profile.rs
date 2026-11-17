@@ -5,6 +5,7 @@
 //! (macOS Keychain, Windows Credential Manager, Linux Secret Service); see [`crate::secret_store`].
 
 use std::fs;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, bail};
@@ -25,6 +26,10 @@ pub struct Profile {
     #[serde(default = "default_use_jump")]
     pub use_jump: bool,
     pub jump: JumpHost,
+    /// Connect through the built-in WireGuard VPN instead of an SSH jump host. Never set together
+    /// with `use_jump`.
+    #[serde(default)]
+    pub vpn: Option<Vpn>,
     pub target: Target,
     #[serde(default = "default_width")]
     pub width: u16,
@@ -86,6 +91,21 @@ pub struct JumpHost {
     pub key_path: Option<PathBuf>,
 }
 
+/// The WireGuard peer of a profile that connects through the built-in VPN. The private key is a
+/// secret ([`Secret::Vpn`]), not part of this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vpn {
+    /// `host:port` of the peer.
+    pub endpoint: String,
+    /// This client's addresses inside the VPN.
+    pub addresses: Vec<IpAddr>,
+    /// The peer's public key (base64).
+    pub peer_public_key: String,
+    /// Seconds between keepalive packets, for peers behind NAT.
+    #[serde(default)]
+    pub keepalive: Option<u16>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Target {
     /// Host name as seen from the jump host. RDP also uses it as the TLS / CredSSP server name.
@@ -132,6 +152,8 @@ pub enum Secret {
     /// Password on the target (Windows account for RDP), or the key passphrase of an SSH target
     /// with `key_path` set.
     Target,
+    /// Private key of the built-in WireGuard VPN.
+    Vpn,
 }
 
 impl Secret {
@@ -140,6 +162,7 @@ impl Secret {
             Secret::Jump => format!("{id}:jump"),
             // Named before other protocols existed; kept so stored passwords stay where they are.
             Secret::Target => format!("{id}:rdp"),
+            Secret::Vpn => format!("{id}:vpn"),
         }
     }
 }
@@ -158,7 +181,13 @@ impl Profile {
     }
 
     fn secret_accounts(&self) -> Vec<String> {
-        [Secret::Jump, Secret::Target].map(|which| which.account(self.id)).into()
+        [Secret::Jump, Secret::Target, Secret::Vpn].map(|which| which.account(self.id)).into()
+    }
+
+    /// Whether the connection to the target is encrypted on its way (by the jump host's SSH
+    /// session or by the VPN), so it may carry an account password.
+    pub fn is_tunneled(&self) -> bool {
+        self.use_jump || self.vpn.is_some()
     }
 }
 
@@ -295,6 +324,36 @@ mod tests {
         let id = Uuid::nil();
         assert_eq!(Secret::Target.account(id), format!("{id}:rdp"));
         assert_eq!(Secret::Jump.account(id), format!("{id}:jump"));
+    }
+
+    #[test]
+    fn profile_without_vpn_has_none() {
+        let store: ProfileStore = toml::from_str(PROFILE).expect("parse");
+        assert_eq!(store.profiles()[0].vpn, None);
+        assert!(store.profiles()[0].is_tunneled());
+    }
+
+    #[test]
+    fn vpn_settings_round_trip_without_the_private_key() {
+        let mut store: ProfileStore = toml::from_str(PROFILE).expect("parse");
+        store.profiles[0].use_jump = false;
+        store.profiles[0].vpn = Some(Vpn {
+            endpoint: "vpn.example.com:51820".into(),
+            addresses: vec!["10.8.0.2".parse().unwrap(), "fd00::2".parse().unwrap()],
+            peer_public_key: "peer".into(),
+            keepalive: Some(25),
+        });
+        let text = toml::to_string_pretty(&store).expect("serialize");
+        assert!(!text.to_lowercase().contains("private"), "{text}");
+        let again: ProfileStore = toml::from_str(&text).expect("parse");
+        assert_eq!(again.profiles()[0].vpn, store.profiles()[0].vpn);
+        assert!(again.profiles()[0].is_tunneled());
+    }
+
+    #[test]
+    fn the_vpn_private_key_has_its_own_account() {
+        let id = Uuid::nil();
+        assert_eq!(Secret::Vpn.account(id), format!("{id}:vpn"));
     }
 
     #[test]

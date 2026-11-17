@@ -1,6 +1,7 @@
 //! Add / edit connection form: state, validation and view.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use eframe::egui::{self, RichText, Ui};
@@ -8,7 +9,8 @@ use uuid::Uuid;
 
 use super::theme::{Bold as _, palette};
 use super::widgets::{self, card, field, section_title, text_input};
-use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, Protocol, Secret, Target};
+use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, Protocol, Secret, Target, Vpn};
+use crate::vpn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Field {
@@ -24,6 +26,11 @@ pub enum Field {
     TargetKeyPath,
     TargetSecret,
     Resolution,
+    VpnEndpoint,
+    VpnAddress,
+    VpnPeerKey,
+    VpnKeepalive,
+    VpnSecret,
 }
 
 pub type Errors = BTreeMap<Field, String>;
@@ -33,6 +40,17 @@ enum Auth {
     Password,
     Key,
 }
+
+/// How the session reaches the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Direct,
+    Jump,
+    Vpn,
+}
+
+/// A WireGuard configuration file is a few hundred bytes; anything much larger is not one.
+const MAX_VPN_CONFIG_BYTES: u64 = 64 * 1024;
 
 /// Fixed resolutions offered in the list (common Windows App presets).
 const RESOLUTIONS: [(u16, u16); 23] = [
@@ -69,7 +87,22 @@ pub struct Form {
     /// `use_jump` of the stored profile; `None` while creating a new profile.
     stored_use_jump: Option<bool>,
     name: String,
+    /// Mutually exclusive with `use_vpn`; see [`Form::set_route`].
     use_jump: bool,
+    /// `vpn` of the stored profile was set; `None` while creating a new profile.
+    stored_use_vpn: Option<bool>,
+    use_vpn: bool,
+    vpn_endpoint: String,
+    /// Comma separated.
+    vpn_addresses: String,
+    vpn_peer_key: String,
+    /// Seconds; empty for none.
+    vpn_keepalive: String,
+    /// The private key of this device.
+    vpn_secret: String,
+    change_vpn_secret: bool,
+    /// Why the last configuration file could not be imported.
+    vpn_import_error: Option<String>,
     jump_host: String,
     jump_port: String,
     jump_user: String,
@@ -120,6 +153,15 @@ impl Form {
             stored_use_jump: None,
             name: String::new(),
             use_jump: true,
+            stored_use_vpn: None,
+            use_vpn: false,
+            vpn_endpoint: String::new(),
+            vpn_addresses: String::new(),
+            vpn_peer_key: String::new(),
+            vpn_keepalive: String::new(),
+            vpn_secret: String::new(),
+            change_vpn_secret: true,
+            vpn_import_error: None,
             jump_host: String::new(),
             jump_port: "22".into(),
             jump_user: String::new(),
@@ -157,6 +199,19 @@ impl Form {
             stored_use_jump: Some(p.use_jump),
             name: p.name.clone(),
             use_jump: p.use_jump,
+            stored_use_vpn: Some(p.vpn.is_some()),
+            use_vpn: p.vpn.is_some(),
+            vpn_endpoint: p.vpn.as_ref().map(|v| v.endpoint.clone()).unwrap_or_default(),
+            vpn_addresses: p
+                .vpn
+                .as_ref()
+                .map(|v| v.addresses.iter().map(IpAddr::to_string).collect::<Vec<_>>().join(", "))
+                .unwrap_or_default(),
+            vpn_peer_key: p.vpn.as_ref().map(|v| v.peer_public_key.clone()).unwrap_or_default(),
+            vpn_keepalive: p.vpn.as_ref().and_then(|v| v.keepalive).map(|s| s.to_string()).unwrap_or_default(),
+            vpn_secret: String::new(),
+            change_vpn_secret: false,
+            vpn_import_error: None,
             jump_host: p.jump.host.clone(),
             jump_port: p.jump.port.to_string(),
             jump_user: p.jump.user.clone(),
@@ -197,6 +252,7 @@ impl Form {
             f.errors.clear();
             f.attempted = false;
             f.focus_pending = false;
+            f.vpn_import_error = None;
         }
         a != b
     }
@@ -209,6 +265,32 @@ impl Form {
     /// host was just enabled on a profile that connected directly.
     fn jump_secret_required(&self) -> bool {
         self.is_new() || self.auth_switched() || self.stored_use_jump == Some(false)
+    }
+
+    fn route(&self) -> Route {
+        if self.use_vpn {
+            Route::Vpn
+        } else if self.use_jump {
+            Route::Jump
+        } else {
+            Route::Direct
+        }
+    }
+
+    fn set_route(&mut self, route: Route) {
+        self.use_jump = route == Route::Jump;
+        self.use_vpn = route == Route::Vpn;
+    }
+
+    /// The private key must be (re-)entered: new profile, or the VPN was just enabled on a
+    /// profile that did not use one.
+    fn vpn_secret_required(&self) -> bool {
+        self.is_new() || self.stored_use_vpn != Some(true)
+    }
+
+    /// The jump host or the VPN carries the connection, so it may hold a macOS account password.
+    fn tunneled(&self) -> bool {
+        self.use_jump || self.use_vpn
     }
 
     fn target_auth_switched(&self) -> bool {
@@ -286,8 +368,13 @@ impl Form {
             .target_uses_key()
             .then(|| required(Field::TargetKeyPath, &self.target_key_path, "개인 키 파일을 선택하세요"));
         // The macOS account password would cross the network unprotected.
-        if self.vnc_account() && !self.use_jump {
-            errors.insert(Field::TargetUser, "macOS 계정 로그인은 점프 호스트를 거칠 때만 쓸 수 있습니다".into());
+        if self.vnc_account() && !self.tunneled() {
+            errors.insert(Field::TargetUser, "macOS 계정 로그인은 점프 호스트나 VPN을 거칠 때만 쓸 수 있습니다".into());
+        }
+        let vpn = self.use_vpn.then(|| self.vpn_settings(&mut errors)).flatten();
+        // The VPN has no name service: the target is addressed by IP.
+        if self.use_vpn && !target_host.is_empty() && target_host.trim_matches(['[', ']']).parse::<IpAddr>().is_err() {
+            errors.insert(Field::TargetHost, "VPN 안에서는 IP 주소로 입력하세요 (예: 10.8.0.5)".into());
         }
 
         if !name.is_empty()
@@ -325,6 +412,10 @@ impl Form {
         if needs_jump_secret && self.jump_secret.is_empty() {
             errors.insert(Field::JumpSecret, "비밀번호를 입력하세요".into());
         }
+        let needs_vpn_secret = self.use_vpn && (self.vpn_secret_required() || self.change_vpn_secret);
+        if needs_vpn_secret && vpn::decode_key(&self.vpn_secret).is_err() {
+            errors.insert(Field::VpnSecret, "WireGuard 개인키(base64, 44자)를 입력하세요".into());
+        }
         // A key passphrase may be empty, and a VNC server may ask for no password.
         let optional = self.target_uses_key() || (self.protocol == Protocol::Vnc && !self.vnc_account());
         let needs_target_secret = !optional && (self.target_secret_required() || self.change_target_secret);
@@ -347,6 +438,7 @@ impl Form {
                 user: jump_user,
                 key_path: key_path.map(|k| expand_tilde(&k)),
             },
+            vpn,
             target: Target {
                 host: target_host,
                 port: target_port,
@@ -360,10 +452,68 @@ impl Form {
         })
     }
 
+    /// The VPN settings as typed; adds an error for each one that is wrong.
+    fn vpn_settings(&self, errors: &mut Errors) -> Option<Vpn> {
+        let endpoint = self.vpn_endpoint.trim().to_owned();
+        if !vpn::is_valid_endpoint(&endpoint) {
+            errors.insert(Field::VpnEndpoint, "호스트:포트 형식으로 입력하세요 (예: vpn.example.com:51820)".into());
+        }
+        let addresses: Result<Vec<IpAddr>, _> = self
+            .vpn_addresses
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            // `10.8.0.2/32` as written in a WireGuard file.
+            .map(|item| item.split('/').next().unwrap_or_default().parse::<IpAddr>())
+            .collect();
+        let addresses = addresses.ok().filter(|list| !list.is_empty());
+        if addresses.is_none() {
+            errors.insert(Field::VpnAddress, "VPN 안에서 쓸 IP 주소를 입력하세요 (예: 10.8.0.2)".into());
+        }
+        let peer_public_key = self.vpn_peer_key.trim().to_owned();
+        if vpn::decode_key(&peer_public_key).is_err() {
+            errors.insert(Field::VpnPeerKey, "서버의 WireGuard 공개키(base64, 44자)를 입력하세요".into());
+        }
+        let keepalive = match self.vpn_keepalive.trim() {
+            "" => None,
+            text => match parse_port(text) {
+                Some(seconds) => Some(seconds),
+                None => {
+                    errors.insert(Field::VpnKeepalive, "1–65535초, 비워 두면 사용 안 함".into());
+                    None
+                }
+            },
+        };
+        Some(Vpn { endpoint, addresses: addresses?, peer_public_key, keepalive })
+    }
+
+    /// Fills the VPN fields from a WireGuard configuration file.
+    fn import_vpn_config(&mut self, path: &std::path::Path) {
+        let result = (|| {
+            let size = std::fs::metadata(path)?.len();
+            anyhow::ensure!(size <= MAX_VPN_CONFIG_BYTES, "WireGuard 설정 파일이 아닌 것 같습니다 (너무 큽니다)");
+            let text = std::fs::read_to_string(path)?;
+            vpn::parse_config(&text)
+        })();
+        match result {
+            Ok(config) => {
+                self.vpn_endpoint = config.endpoint;
+                self.vpn_addresses = config.addresses.iter().map(IpAddr::to_string).collect::<Vec<_>>().join(", ");
+                self.vpn_peer_key = config.peer_public_key;
+                self.vpn_keepalive = config.keepalive.map(|s| s.to_string()).unwrap_or_default();
+                self.vpn_secret = config.private_key;
+                self.change_vpn_secret = true;
+                self.vpn_import_error = None;
+            }
+            Err(e) => self.vpn_import_error = Some(format!("{e:#}")),
+        }
+    }
+
     /// Writes changed secrets to the credential store, then saves the profile list.
     pub fn commit(&self, profile: &Profile, store: &mut ProfileStore) -> anyhow::Result<()> {
         let write_jump = self.use_jump && (self.jump_secret_required() || self.change_jump_secret);
         let write_target = self.target_secret_required() || self.change_target_secret;
+        let write_vpn = self.use_vpn && (self.vpn_secret_required() || self.change_vpn_secret);
         store.upsert(profile.clone())?;
         if write_jump {
             // A key without passphrase stores an empty secret.
@@ -371,6 +521,9 @@ impl Form {
         }
         if write_target {
             profile.set_secret(Secret::Target, &self.target_secret)?;
+        }
+        if write_vpn {
+            profile.set_secret(Secret::Vpn, self.vpn_secret.trim())?;
         }
         store.save()
     }
@@ -396,7 +549,7 @@ impl Form {
             ui.vertical(|ui| {
                 ui.label(RichText::new(if self.is_new() { "새 연결" } else { "연결 편집" }).size(super::theme::HEADING_SIZE).bold());
                 ui.label(
-                    RichText::new("원격 PC나 서버에 직접 또는 SSH 점프 호스트를 거쳐 접속합니다.").color(pal.text_weak),
+                    RichText::new("원격 PC나 서버에 직접, SSH 점프 호스트나 VPN을 거쳐 접속합니다.").color(pal.text_weak),
                 );
             });
         });
@@ -455,18 +608,46 @@ impl Form {
             });
 
             card(ui, |ui| {
-                let description = format!("{}로 들어가는 관문 역할을 하는 SSH 서버입니다.", super::target_noun(self.protocol));
-                section_title(ui, "SSH 점프 호스트", Some(description.as_str()));
-                field(ui, "사용", None, |ui| {
-                    widgets::segmented(ui, &mut self.use_jump, &[(true, "사용"), (false, "사용 안 함 (직접 접속)")]);
+                let description = format!("{}에 닿는 방법을 고르세요.", super::target_noun(self.protocol));
+                section_title(ui, "접속 경로", Some(description.as_str()));
+                field(ui, "방식", None, |ui| {
+                    let mut route = self.route();
+                    let options = [(Route::Direct, "직접 접속"), (Route::Jump, "SSH 점프 호스트"), (Route::Vpn, "VPN (WireGuard)")];
+                    if widgets::segmented(ui, &mut route, &options) {
+                        self.set_route(route);
+                    }
                 });
-                if !self.use_jump {
-                    let text = format!(
-                        "점프 호스트 없이 {}에 바로 접속합니다. 입력해 둔 설정은 보관됩니다.",
+                let about = match self.route() {
+                    Route::Direct => format!(
+                        "점프 호스트나 VPN 없이 {}에 바로 접속합니다. 입력해 둔 점프 호스트 설정은 보관됩니다.",
                         super::target_noun(self.protocol)
-                    );
-                    ui.label(RichText::new(text).color(pal.text_weak));
-                    return;
+                    ),
+                    Route::Jump => "관문 역할을 하는 SSH 서버를 거쳐 접속합니다.".to_owned(),
+                    Route::Vpn => "앱에 내장된 WireGuard로 접속합니다. 다른 앱의 네트워크에는 영향을 주지 않습니다.".to_owned(),
+                };
+                ui.label(RichText::new(about).color(pal.text_weak));
+                match self.route() {
+                    Route::Direct => {
+                        // The warning sits next to the choice that causes it.
+                        if self.protocol == Protocol::Vnc {
+                            widgets::banner(ui, pal.danger_soft, pal.danger.gamma_multiply(0.4), |ui| {
+                                ui.label(RichText::new("암호화되지 않은 연결").bold().color(pal.danger));
+                                ui.label(
+                                    RichText::new(
+                                        "점프 호스트나 VPN 없이 접속하면 화면과 키 입력이 네트워크에 그대로 보입니다. \
+                                         신뢰할 수 있는 네트워크에서만 쓰세요.",
+                                    )
+                                    .color(pal.text),
+                                );
+                            });
+                        }
+                        return;
+                    }
+                    Route::Vpn => {
+                        self.vpn_fields(ui, full, &errors);
+                        return;
+                    }
+                    Route::Jump => {}
                 }
                 host_port_row(
                     ui,
@@ -527,7 +708,9 @@ impl Form {
                     Protocol::Ssh => "server.example.com",
                     _ => "pc.example.com",
                 };
-                let description = if self.use_jump {
+                let description = if self.use_vpn {
+                    format!("{noun} 주소는 VPN 안에서 보이는 IP 주소로 입력하세요. 예: 10.8.0.5")
+                } else if self.use_jump {
                     format!("{noun} 주소는 점프 호스트에서 접근하는 기준으로 입력하세요. 예: 10.0.0.5")
                 } else {
                     format!("이 기기에서 바로 접근할 수 있는 주소를 입력하세요. 예: {example}")
@@ -675,22 +858,61 @@ impl Form {
 }
 
 impl Form {
-    /// VNC target: an optional macOS account, the password, and a warning without the jump host.
-    fn vnc_fields(&mut self, ui: &mut Ui, full: f32, errors: &Errors) {
+    /// Built-in WireGuard VPN: peer, this device's address and key.
+    fn vpn_fields(&mut self, ui: &mut Ui, full: f32, errors: &Errors) {
         let pal = palette(ui);
         let err = |f: Field| errors.get(&f).map(String::as_str);
-        if !self.use_jump {
-            widgets::banner(ui, pal.danger_soft, pal.danger.gamma_multiply(0.4), |ui| {
-                ui.label(RichText::new("암호화되지 않은 연결").bold().color(pal.danger));
-                ui.label(
-                    RichText::new(
-                        "점프 호스트 없이 접속하면 화면과 키 입력이 네트워크에 그대로 보입니다. \
-                         신뢰할 수 있는 네트워크에서만 쓰세요.",
-                    )
-                    .color(pal.text),
-                );
-            });
+        ui.horizontal(|ui| {
+            if ui.button("WireGuard 설정 파일 가져오기...").clicked()
+                && let Some(path) = pick_vpn_config()
+            {
+                self.import_vpn_config(&path);
+            }
+            ui.label(RichText::new("wg-quick 형식(.conf)").small().color(pal.text_weak));
+        });
+        if let Some(error) = &self.vpn_import_error {
+            ui.label(RichText::new(error).color(pal.danger));
         }
+        let edit = text_input(ui, &mut self.vpn_endpoint, "예: vpn.example.com:51820", full, err(Field::VpnEndpoint).is_some());
+        field(ui, "VPN 서버 (Endpoint)", err(Field::VpnEndpoint), |ui| ui.add(edit));
+        ui.horizontal(|ui| {
+            let keepalive_w = 220.0;
+            let edit = text_input(
+                ui,
+                &mut self.vpn_addresses,
+                "예: 10.8.0.2 (여러 개는 쉼표로 구분)",
+                full - keepalive_w - 8.0,
+                err(Field::VpnAddress).is_some(),
+            );
+            field(ui, "이 기기의 VPN 주소", err(Field::VpnAddress), |ui| ui.add(edit));
+            let edit = text_input(ui, &mut self.vpn_keepalive, "공유기(NAT) 뒤라면 25", keepalive_w, err(Field::VpnKeepalive).is_some());
+            field(ui, "연결 유지 간격 (초, 선택)", err(Field::VpnKeepalive), |ui| ui.add(edit));
+        });
+        let edit = text_input(ui, &mut self.vpn_peer_key, "base64, 44자", full, err(Field::VpnPeerKey).is_some());
+        field(ui, "서버 공개키", err(Field::VpnPeerKey), |ui| ui.add(edit));
+        let force = self.vpn_secret_required();
+        secret_field(
+            ui,
+            full,
+            "이 기기의 개인키",
+            "base64, 44자",
+            &mut self.vpn_secret,
+            &mut self.change_vpn_secret,
+            force,
+            err(Field::VpnSecret),
+        );
+        ui.label(
+            RichText::new(
+                "사전 공유 키(PresharedKey)와 DNS 설정은 지원하지 않습니다.",
+            )
+            .small()
+            .color(pal.text_weak),
+        );
+    }
+
+    /// VNC target: an optional macOS account and the password.
+    fn vnc_fields(&mut self, ui: &mut Ui, full: f32, errors: &Errors) {
+        let err = |f: Field| errors.get(&f).map(String::as_str);
         let edit = text_input(ui, &mut self.target_user, "비워 두면 VNC 비밀번호로 접속", full, err(Field::TargetUser).is_some());
         field(ui, "macOS 계정 (선택)", err(Field::TargetUser), |ui| ui.add(edit));
         let (label, hint) = if self.vnc_account() {
@@ -806,6 +1028,14 @@ fn expand_tilde(path: &str) -> PathBuf {
     }
 }
 
+fn pick_vpn_config() -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title("WireGuard 설정 파일 선택").add_filter("WireGuard", &["conf"]);
+    if let Some(dir) = directories::UserDirs::new().and_then(|d| d.download_dir().map(std::path::Path::to_path_buf)).filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_file()
+}
+
 fn pick_key_file(current: &str) -> Option<PathBuf> {
     let start = if current.trim().is_empty() {
         directories::BaseDirs::new().map(|d| d.home_dir().join(".ssh"))
@@ -911,5 +1141,119 @@ mod tests {
         edit.target_auth = Auth::Key;
         edit.target_key_path = "/keys/id_ed25519".into();
         assert!(edit.target_secret_required(), "the old password is no key passphrase");
+    }
+    /// 32 bytes of 0x01 and 0x02 as WireGuard keys.
+    const KEY_A: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+    const KEY_B: &str = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=";
+
+    fn vpn_form() -> Form {
+        let mut form = ssh_form();
+        form.target_secret = "secret".into();
+        form.set_route(Route::Vpn);
+        form.vpn_endpoint = "vpn.example.com:51820".into();
+        form.vpn_addresses = "10.8.0.2/32, fd00::2".into();
+        form.vpn_peer_key = KEY_B.into();
+        form.vpn_secret = KEY_A.into();
+        form
+    }
+
+    #[test]
+    fn a_vpn_profile_keeps_the_peer_and_leaves_the_private_key_to_the_store() {
+        let profile = vpn_form().validate(&ProfileStore::default()).expect("valid");
+        assert!(!profile.use_jump);
+        let vpn = profile.vpn.expect("vpn");
+        assert_eq!(vpn.endpoint, "vpn.example.com:51820");
+        assert_eq!(vpn.addresses, ["10.8.0.2".parse::<IpAddr>().unwrap(), "fd00::2".parse().unwrap()]);
+        assert_eq!(vpn.peer_public_key, KEY_B);
+        assert_eq!(vpn.keepalive, None);
+    }
+
+    #[test]
+    fn every_wrong_vpn_field_is_reported() {
+        let mut form = vpn_form();
+        form.vpn_endpoint = "vpn.example.com".into();
+        form.vpn_addresses = "not an address".into();
+        form.vpn_peer_key = "short".into();
+        form.vpn_keepalive = "0".into();
+        form.vpn_secret = "short".into();
+        let errors = form.validate(&ProfileStore::default()).unwrap_err();
+        for field in [Field::VpnEndpoint, Field::VpnAddress, Field::VpnPeerKey, Field::VpnKeepalive, Field::VpnSecret] {
+            assert!(errors.contains_key(&field), "{field:?}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn a_vpn_target_is_addressed_by_ip() {
+        let mut form = vpn_form();
+        form.target_host = "server.internal".into();
+        assert!(form.validate(&ProfileStore::default()).unwrap_err().contains_key(&Field::TargetHost));
+        form.target_host = "10.8.0.5".into();
+        assert!(form.validate(&ProfileStore::default()).is_ok());
+    }
+
+    #[test]
+    fn disabled_vpn_settings_are_not_validated_or_saved() {
+        let mut form = vpn_form();
+        form.vpn_endpoint = "garbage".into();
+        form.set_route(Route::Direct);
+        assert_eq!(form.validate(&ProfileStore::default()).expect("valid").vpn, None);
+    }
+
+    #[test]
+    fn a_macos_account_may_log_on_through_the_vpn() {
+        let mut form = vpn_form();
+        form.set_protocol(Protocol::Vnc);
+        form.target_user = "hong".into();
+        assert!(form.validate(&ProfileStore::default()).is_ok());
+    }
+
+    #[test]
+    fn editing_keeps_the_stored_private_key_until_the_vpn_is_newly_enabled() {
+        let profile = vpn_form().validate(&ProfileStore::default()).expect("valid");
+        let mut edit = Form::from_profile(&profile);
+        assert!(edit.use_vpn && !edit.vpn_secret_required());
+        assert!(edit.validate(&ProfileStore::default()).is_ok(), "the stored key is kept");
+        edit.vpn_endpoint = "other.example.com:51820".into();
+        assert!(edit.is_dirty(&Form::from_profile(&profile)), "a change is noticed");
+
+        // A profile that connected directly needs the key when the VPN is switched on.
+        let mut direct_form = ssh_form();
+        direct_form.target_secret = "secret".into();
+        let direct = direct_form.validate(&ProfileStore::default()).expect("valid");
+        let mut enable = Form::from_profile(&direct);
+        enable.set_route(Route::Vpn);
+        enable.vpn_endpoint = "vpn.example.com:51820".into();
+        enable.vpn_addresses = "10.8.0.2".into();
+        enable.vpn_peer_key = KEY_B.into();
+        assert!(enable.validate(&ProfileStore::default()).unwrap_err().contains_key(&Field::VpnSecret));
+        enable.vpn_secret = KEY_A.into();
+        assert!(enable.validate(&ProfileStore::default()).is_ok());
+    }
+
+    #[test]
+    fn importing_a_wireguard_file_fills_the_fields_and_a_bad_file_says_why() {
+        let dir = std::env::temp_dir().join(format!("hopdesk-vpn-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("wg0.conf");
+        std::fs::write(
+            &good,
+            format!(
+                "[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.8.0.2/32\n[Peer]\nPublicKey = {KEY_B}\n\
+                 Endpoint = vpn.example.com:51820\nPersistentKeepalive = 25\n"
+            ),
+        )
+        .unwrap();
+        let mut form = ssh_form();
+        form.set_route(Route::Vpn);
+        form.import_vpn_config(&good);
+        assert_eq!(form.vpn_import_error, None);
+        assert_eq!((form.vpn_endpoint.as_str(), form.vpn_addresses.as_str(), form.vpn_keepalive.as_str()), ("vpn.example.com:51820", "10.8.0.2", "25"));
+        assert_eq!((form.vpn_secret.as_str(), form.vpn_peer_key.as_str()), (KEY_A, KEY_B));
+
+        let bad = dir.join("notes.conf");
+        std::fs::write(&bad, "hello").unwrap();
+        form.import_vpn_config(&bad);
+        assert!(form.vpn_import_error.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::sessions::{Sessions, State};
 use super::{Launcher, Nav, theme};
-use crate::profile::{JumpHost, Profile, ProfileStore, Protocol, Target};
+use crate::profile::{JumpHost, Profile, ProfileStore, Protocol, Target, Vpn};
 
 fn profile(name: &str, jump: &str, target: &str, user: &str, key: bool) -> Profile {
     Profile {
@@ -26,6 +26,7 @@ fn profile(name: &str, jump: &str, target: &str, user: &str, key: bool) -> Profi
             user: "ubuntu".into(),
             key_path: key.then(|| PathBuf::from("/Users/me/.ssh/id_ed25519")),
         },
+        vpn: None,
         target: Target {
             host: target.into(),
             port: 3389,
@@ -169,6 +170,24 @@ fn screenshots() {
     shot(&mut h, "14-vnc-direct");
     h.state_mut().apply_nav(Nav::Edit(vnc_id));
     shot(&mut h, "15-vnc-direct-edit");
+
+    // Built-in VPN: detail while connecting, then its edit form
+    let mut vpn = profile("연구소 PC", "", "10.8.0.5", "hong", false);
+    vpn.use_jump = false;
+    vpn.vpn = Some(Vpn {
+        endpoint: "vpn.example.com:51820".into(),
+        addresses: vec!["10.8.0.2".parse().expect("address")],
+        peer_public_key: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=".into(),
+        keepalive: Some(25),
+    });
+    let vpn_id = vpn.id;
+    let sessions = Sessions::default();
+    sessions.set_for_test(vpn_id, State::Ssh, vec![]);
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![vpn.clone()]), sessions), false);
+    shot(&mut h, "16-vpn-connecting");
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(vec![vpn]), Sessions::default()), false);
+    h.state_mut().apply_nav(Nav::Edit(vpn_id));
+    shot(&mut h, "17-vpn-edit");
 
     // 10. Update offered in the sidebar
     let h_launcher = Launcher::with_store(ProfileStore::from_profiles(sample()), Sessions::default());

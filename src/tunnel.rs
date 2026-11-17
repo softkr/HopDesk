@@ -1,4 +1,6 @@
-//! SSH jump host tunnel: one SSH session, one `direct-tcpip` channel per connection attempt to the target.
+//! How a session reaches its target when it is not connected directly: through an SSH jump host
+//! (one SSH session, one `direct-tcpip` channel per connection attempt to the target) or through
+//! the built-in WireGuard VPN. Both hand out in-memory streams.
 
 use core::time::Duration;
 use std::io;
@@ -12,6 +14,7 @@ use tokio::io::DuplexStream;
 use tracing::{error, info, warn};
 
 use crate::trust::{Kind, TrustStore, Verdict};
+use crate::vpn::{Vpn, VpnParams};
 
 pub struct JumpParams {
     pub host: String,
@@ -114,19 +117,57 @@ pub async fn authenticate(
     Ok(result.success())
 }
 
+/// The way to the target of a profile that does not connect directly.
 pub struct Tunnel {
+    route: Route,
+}
+
+enum Route {
+    Jump(JumpTunnel),
+    Vpn(Vpn),
+}
+
+impl Tunnel {
+    pub fn jump(params: JumpParams, trust: Arc<TrustStore>) -> Arc<Self> {
+        Arc::new(Self { route: Route::Jump(JumpTunnel::new(params, trust)) })
+    }
+
+    pub fn vpn(params: VpnParams) -> Arc<Self> {
+        Arc::new(Self { route: Route::Vpn(Vpn::new(params)) })
+    }
+
+    /// Establishes the tunnel now so configuration errors surface before the window opens.
+    pub async fn ensure_connected(&self) -> anyhow::Result<()> {
+        match &self.route {
+            Route::Jump(jump) => jump.ensure_connected().await,
+            Route::Vpn(vpn) => vpn.ensure_connected().await,
+        }
+    }
+
+    /// Opens a stream to `host:port` on the far side. Re-establishes the tunnel when it was
+    /// closed, so auto-reconnect keeps working.
+    pub async fn open(&self, host: &str, port: u16) -> io::Result<DuplexStream> {
+        match &self.route {
+            Route::Jump(jump) => jump.open(host, port).await,
+            Route::Vpn(vpn) => vpn.open(host, port).await,
+        }
+    }
+}
+
+/// One SSH session to the jump host.
+struct JumpTunnel {
     params: JumpParams,
     trust: Arc<TrustStore>,
     handle: tokio::sync::Mutex<Option<Handle<HostKeyVerifier>>>,
 }
 
-impl Tunnel {
-    pub fn new(params: JumpParams, trust: Arc<TrustStore>) -> Arc<Self> {
-        Arc::new(Self {
+impl JumpTunnel {
+    fn new(params: JumpParams, trust: Arc<TrustStore>) -> Self {
+        Self {
             params,
             trust,
             handle: tokio::sync::Mutex::new(None),
-        })
+        }
     }
 
     async fn connect_ssh(&self) -> anyhow::Result<Handle<HostKeyVerifier>> {
@@ -152,8 +193,7 @@ impl Tunnel {
         Ok(handle)
     }
 
-    /// Establishes the SSH session now so configuration errors surface before the window opens.
-    pub async fn ensure_connected(&self) -> anyhow::Result<()> {
+    async fn ensure_connected(&self) -> anyhow::Result<()> {
         let mut guard = self.handle.lock().await;
         if guard.as_ref().is_none_or(|h| h.is_closed()) {
             *guard = Some(self.connect_ssh().await?);
@@ -164,7 +204,7 @@ impl Tunnel {
     /// Opens a `direct-tcpip` channel from the jump host to `host:port`.
     ///
     /// Re-establishes the SSH session when it was closed, so auto-reconnect keeps working.
-    pub async fn open(&self, host: &str, port: u16) -> io::Result<DuplexStream> {
+    async fn open(&self, host: &str, port: u16) -> io::Result<DuplexStream> {
         let mut guard = self.handle.lock().await;
         if guard.as_ref().is_none_or(|h| h.is_closed()) {
             *guard = Some(self.connect_ssh().await.map_err(|e| io::Error::other(format!("{e:#}")))?);

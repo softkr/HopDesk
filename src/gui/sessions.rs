@@ -258,6 +258,7 @@ fn explain(detail: &str, log: &[String], state: &State, protocol: Protocol) -> F
     let target_key_changed = has("TARGET SSH HOST KEY CHANGED");
     let jump_key_changed = has("SSH HOST KEY CHANGED") && !target_key_changed;
     let target_unreachable = has("SSH connect to target") || has("TCP connect");
+    let vpn_settings_wrong = has("VPN private key") || has("VPN peer public key") || has("VPN target must be");
     let key_hint = |what: &str| {
         format!(
             "{what}를 교체한 것이 확실하다면 ‘호스트 키 초기화’ 후 다시 연결하세요. \
@@ -277,6 +278,30 @@ fn explain(detail: &str, log: &[String], state: &State, protocol: Protocol) -> F
         )
     } else if has("RDP CERTIFICATE CHANGED") {
         ("원격 PC의 인증서가 바뀌었습니다".into(), key_hint("인증서"), true)
+    } else if has("no stored VPN private key") {
+        (
+            "저장된 VPN 개인키가 없습니다".into(),
+            "연결을 편집해서 개인키를 다시 입력하세요.".into(),
+            false,
+        )
+    } else if vpn_settings_wrong {
+        (
+            "VPN 설정이 올바르지 않습니다".into(),
+            "연결을 편집해서 키와 대상 주소(VPN 안에서는 IP 주소)를 확인하세요.".into(),
+            false,
+        )
+    } else if has("VPN handshake timed out") {
+        (
+            "VPN에 연결할 수 없습니다".into(),
+            "VPN 서버 주소·포트와 두 키가 맞는지, 서버가 켜져 있고 UDP 포트가 열려 있는지 확인하세요.".into(),
+            false,
+        )
+    } else if has("VPN endpoint lookup failed") {
+        (
+            "VPN 서버 주소를 찾을 수 없습니다".into(),
+            "서버 주소가 맞는지, 인터넷에 연결되어 있는지 확인하세요.".into(),
+            false,
+        )
     } else if has("no stored") {
         (
             "저장된 비밀번호가 없습니다".into(),
@@ -329,6 +354,7 @@ fn explain(detail: &str, log: &[String], state: &State, protocol: Protocol) -> F
         detail: detail.trim().to_owned(),
         key_changed,
         fix_in_settings: has("no stored")
+            || vpn_settings_wrong
             || has("load private key")
             || has("jump host authentication failed")
             || (!key_changed
@@ -352,6 +378,35 @@ mod tests {
         let info = explain("logon failed", &[], &State::Remote, Protocol::Rdp);
         assert_eq!(info.hint, "Windows 사용자 이름, 도메인, 비밀번호를 확인하세요.");
         assert!(info.fix_in_settings);
+    }
+
+    #[test]
+    fn vpn_failures_name_the_vpn_and_say_what_to_check() {
+        let info = explain("VPN handshake timed out (check the endpoint 1.2.3.4:51820)", &[], &State::Ssh, Protocol::Rdp);
+        assert_eq!(info.title, "VPN에 연결할 수 없습니다");
+        assert!(!info.at_remote, "the target was never reached");
+        assert!(!info.fix_in_settings, "the network may be at fault, so retrying is offered");
+
+        let info = explain("VPN endpoint lookup failed for vpn.example.com:51820", &[], &State::Ssh, Protocol::Rdp);
+        assert_eq!(info.title, "VPN 서버 주소를 찾을 수 없습니다");
+
+        let info = explain("no stored VPN private key (edit the profile and enter the key again)", &[], &State::Starting, Protocol::Rdp);
+        assert_eq!(info.title, "저장된 VPN 개인키가 없습니다");
+        assert!(info.fix_in_settings);
+
+        let info = explain("VPN peer public key: not valid base64", &[], &State::Ssh, Protocol::Rdp);
+        assert_eq!(info.title, "VPN 설정이 올바르지 않습니다");
+        assert!(info.fix_in_settings);
+
+        let info = explain("VPN target must be an IP address, got `server.internal`", &[], &State::Remote, Protocol::Ssh);
+        assert_eq!(info.title, "VPN 설정이 올바르지 않습니다");
+    }
+
+    #[test]
+    fn a_refused_connection_inside_the_vpn_blames_the_target() {
+        let info = explain("TCP connect: VPN TCP connection refused", &[], &State::Remote, Protocol::Rdp);
+        assert_eq!(info.title, "원격 PC에 연결할 수 없습니다");
+        assert!(info.at_remote);
     }
 
     #[test]
