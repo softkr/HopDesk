@@ -55,3 +55,26 @@ rm -rf third_party/IronRDP/.git
 ```
 
 Consider proposing the custom transport upstream so the patch can be dropped.
+
+## vnc-rs
+
+- Upstream: https://github.com/HsuJv/vnc-rs
+- Version: 0.6.1 from crates.io (revision `24aa0072d7c49b72e30acd0c9f69eee8b2f220a7`)
+- License: MIT OR Apache-2.0
+
+Used from source because the largest screen the client accepts is a constant in the crate.
+
+### Local patch: `vnc-rs-screen-size-limit.patch`
+
+Raises `MAX_PIXELS` from 4K (3840x2160) to 8K (7680x4320). A Mac with a 5K or 6K display shares
+a screen above the 4K limit, and the connection failed with "Image data cannot be decoded
+correctly" right after authentication. The limit per side (8192) is unchanged.
+
+### Updating vnc-rs
+
+```sh
+rm -rf third_party/vnc-rs
+cargo download vnc-rs==<version> -x -o third_party/vnc-rs   # or unpack the .crate file
+rm -f third_party/vnc-rs/Cargo.lock
+(cd third_party/vnc-rs && patch -p1 < ../vnc-rs-screen-size-limit.patch)
+```
