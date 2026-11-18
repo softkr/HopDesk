@@ -1,6 +1,6 @@
 [package]
 name = "hopdesk"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "HopDesk: RDP desktop client connecting through an SSH jump host"
 publish = false
@@ -17,6 +17,10 @@ ironrdp-rdpdr-native = { path = "third_party/IronRDP/crates/ironrdp-rdpdr-native
 
 # SSH jump host and SSH sessions
 russh = "0.65"
+# Userspace WireGuard VPN: the protocol (no TUN device, no root) and the TCP/IP stack on top of it
+boringtun = { version = "0.7", default-features = false }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
+base64 = "0.22"
 # Terminal emulation for SSH sessions (rendered with egui)
 alacritty_terminal = { version = "0.26", default-features = false }
 # VNC sessions (RFB client, incl. macOS account login)
@@ -43,12 +47,14 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = "0.37"
+# Lucide SVG icons, rasterized by resvg at the exact pixel size
+egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
 rfd = "0.18"
 
-# Session Dock icon and badge, clipboard bridge (the engine has no macOS clipboard backend)
+# Session Dock icon and badge, clipboard bridge (the engine has no macOS clipboard backend), Reduce Motion setting
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSEvent", "NSImage", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAccessibility", "NSApplication", "NSDockTile", "NSEvent", "NSImage", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSWorkspace"] }
 ironrdp-cliprdr = { path = "third_party/IronRDP/crates/ironrdp-cliprdr" }
 ironrdp-core = { path = "third_party/IronRDP/crates/ironrdp-core" }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSGeometry", "NSString", "NSURL"] }

@@ -38,6 +38,7 @@ pub fn run(
     if let Some(tunnel) = &tunnel {
         status::emit(Phase::Ssh, "");
         rt.block_on(tunnel.ensure_connected())?;
+        rt.spawn(Arc::clone(tunnel).report_latency());
     }
     status::emit(Phase::Remote, "");
     let (handle, channel) = rt.block_on(open_shell(profile, password.as_deref(), tunnel, trust))?;
@@ -220,6 +221,7 @@ mod tests {
             protocol: Protocol::Ssh,
             use_jump: jump,
             jump: JumpHost::unset(),
+            vpn: None,
             target: Target {
                 host: host.clone(),
                 port,
@@ -232,7 +234,7 @@ mod tests {
             display: DisplayMode::Fixed,
         };
         let tunnel = jump.then(|| {
-            Tunnel::new(
+            Tunnel::jump(
                 JumpParams {
                     host: host.clone(),
                     port,

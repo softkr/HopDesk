@@ -26,6 +26,19 @@ pub fn shortcut(key: &str) -> String {
     if cfg!(target_os = "macos") { format!("⌘{key}") } else { format!("Ctrl+{key}") }
 }
 
+/// Whether the user asked the OS for less motion (macOS: Accessibility > Display > Reduce motion).
+/// Other platforms are not queried yet and get the full motion.
+pub fn reduce_motion() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// A UI font with matching regular and bold faces that covers Hangul.
 pub struct UiFont {
     pub regular: (std::path::PathBuf, u32),

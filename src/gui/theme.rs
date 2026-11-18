@@ -37,8 +37,8 @@ pub const LIGHT: Palette = Palette {
     control_border: Color32::from_rgb(0x8A, 0x92, 0x9D),
     text: Color32::from_rgb(0x1F, 0x23, 0x28),
     text_weak: Color32::from_rgb(0x65, 0x6D, 0x78),
-    accent: Color32::from_rgb(0x18, 0x64, 0x72),
-    accent_soft: Color32::from_rgb(0xD9, 0xEC, 0xEF),
+    accent: Color32::from_rgb(0x04, 0x78, 0x57),
+    accent_soft: Color32::from_rgb(0xD7, 0xF2, 0xE6),
     on_accent: Color32::WHITE,
     success: Color32::from_rgb(0x16, 0xA3, 0x4A),
     warning: Color32::from_rgb(0xD9, 0x77, 0x06),
@@ -55,9 +55,9 @@ pub const DARK: Palette = Palette {
     control_border: Color32::from_rgb(0x6E, 0x77, 0x83),
     text: Color32::from_rgb(0xE6, 0xE8, 0xEB),
     text_weak: Color32::from_rgb(0x9A, 0xA1, 0xAB),
-    accent: Color32::from_rgb(0x4F, 0xC3, 0xC6),
-    accent_soft: Color32::from_rgb(0x17, 0x3A, 0x42),
-    on_accent: Color32::from_rgb(0x08, 0x25, 0x2C),
+    accent: Color32::from_rgb(0x34, 0xD3, 0x99),
+    accent_soft: Color32::from_rgb(0x14, 0x3D, 0x30),
+    on_accent: Color32::from_rgb(0x06, 0x28, 0x1D),
     success: Color32::from_rgb(0x3F, 0xB9, 0x50),
     warning: Color32::from_rgb(0xE3, 0xA0, 0x08),
     danger: Color32::from_rgb(0xFF, 0x7B, 0x72),
@@ -130,8 +130,13 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
 
 pub fn apply(ctx: &egui::Context) {
     install_fonts(ctx);
+    // Icons are SVGs (see `widgets::Icon`).
+    egui_extras::install_image_loaders(ctx);
     for (theme, pal) in [(Theme::Light, LIGHT), (Theme::Dark, DARK)] {
         ctx.style_mut_of(theme, |style| {
+            // egui's own transitions (fades of areas and popups) match ours.
+            style.animation_time = super::motion::BASE;
+
             style.text_styles = [
                 (TextStyle::Small, FontId::new(13.0, FontFamily::Proportional)),
                 (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
