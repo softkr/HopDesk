@@ -191,8 +191,8 @@ struct Screen {
     width: usize,
     height: usize,
     pixels: Vec<u8>,
-    /// Pixels changed since the window last uploaded them.
-    dirty: bool,
+    /// The area changed since the window last uploaded it, as `[left, top, right, bottom)`.
+    dirty: Option<[usize; 4]>,
     /// Text the remote side copied, for the local clipboard.
     clipboard: Option<String>,
 }
@@ -214,7 +214,34 @@ impl Screen {
         self.width = width;
         self.height = height;
         self.pixels = vec![0; width * height * 4];
-        self.dirty = true;
+        self.dirty = None;
+        self.mark(0, 0, width, height);
+    }
+
+    /// Adds the area to what the window still has to upload.
+    fn mark(&mut self, x: usize, y: usize, w: usize, h: usize) {
+        let area = [x, y, x + w, y + h];
+        self.dirty = Some(match self.dirty {
+            Some([left, top, right, bottom]) => [left.min(area[0]), top.min(area[1]), right.max(area[2]), bottom.max(area[3])],
+            None => area,
+        });
+    }
+
+    /// The changed area's position, size and pixels; the whole screen when `whole` is set.
+    fn take_changes(&mut self, whole: bool) -> Option<Patch> {
+        let [left, top, right, bottom] = if whole && self.width > 0 {
+            self.dirty = None;
+            [0, 0, self.width, self.height]
+        } else {
+            self.dirty.take()?
+        };
+        let (width, height) = (right - left, bottom - top);
+        let mut pixels = Vec::with_capacity(width * height * 4);
+        for row in top..bottom {
+            let start = (row * self.width + left) * 4;
+            pixels.extend_from_slice(&self.pixels[start..start + width * 4]);
+        }
+        Some(Patch { pos: [left, top], size: [width, height], pixels })
     }
 
     /// The rectangle as pixel offsets, or `None` when it does not fit the screen (data from the
@@ -241,7 +268,7 @@ impl Screen {
             // The fourth byte is padding in the pixel format: make every pixel opaque.
             line.iter_mut().skip(3).step_by(4).for_each(|alpha| *alpha = 255);
         }
-        self.dirty = true;
+        self.mark(x, y, w, h);
     }
 
     fn copy(&mut self, dst: vnc::Rect, src: vnc::Rect) {
@@ -262,8 +289,15 @@ impl Screen {
             let start = ((dy + row) * self.width + dx) * 4;
             self.pixels[start..start + w * 4].copy_from_slice(&area[row * w * 4..(row + 1) * w * 4]);
         }
-        self.dirty = true;
+        self.mark(dx, dy, w, h);
     }
+}
+
+/// Changed pixels for the window's texture.
+struct Patch {
+    pos: [usize; 2],
+    size: [usize; 2],
+    pixels: Vec<u8>,
 }
 
 struct Window {
@@ -288,18 +322,26 @@ impl Window {
         let _ = self.input.blocking_send(event);
     }
 
-    /// Uploads changed pixels; returns the remote screen size and copied text.
+    /// Uploads changed pixels only (a 6K screen is 80 MB); returns the remote screen size and
+    /// copied text.
     fn sync_screen(&mut self, ctx: &egui::Context) -> ((usize, usize), Option<String>) {
-        let mut screen = lock(&self.screen);
-        if screen.dirty && screen.width > 0 {
-            screen.dirty = false;
-            let image = ColorImage::from_rgba_unmultiplied([screen.width, screen.height], &screen.pixels);
+        // The lock is held for the copy of the changed area only: the network task waits on it.
+        let (size, patch, copied) = {
+            let mut screen = lock(&self.screen);
+            let size = (screen.width, screen.height);
+            let whole = self.texture.as_ref().is_none_or(|texture| texture.size() != [size.0, size.1]);
+            (size, screen.take_changes(whole), screen.clipboard.take())
+        };
+        if let Some(patch) = patch {
+            // Pixels are opaque, so premultiplying would change nothing.
+            let image = ColorImage::from_rgba_premultiplied(patch.size, &patch.pixels);
             match &mut self.texture {
-                Some(texture) => texture.set(image, TextureOptions::LINEAR),
+                Some(texture) if patch.size == [size.0, size.1] => texture.set(image, TextureOptions::LINEAR),
+                Some(texture) => texture.set_partial(patch.pos, image, TextureOptions::LINEAR),
                 None => self.texture = Some(ctx.load_texture("vnc-screen", image, TextureOptions::LINEAR)),
             }
         }
-        ((screen.width, screen.height), screen.clipboard.take())
+        (size, copied)
     }
 
     /// Fits the window to the remote screen once, within the monitor.
@@ -593,12 +635,27 @@ mod tests {
     fn updates_outside_the_screen_are_ignored() {
         let mut screen = Screen::default();
         screen.resize(4, 3);
-        screen.dirty = false;
+        screen.dirty = None;
         screen.put(rect(3, 0, 2, 1), &[1; 8]);
         screen.put(rect(0, 0, 2, 2), &[1; 4]);
         screen.copy(rect(0, 0, 2, 2), rect(3, 2, 2, 2));
-        assert!(!screen.dirty);
+        assert!(screen.dirty.is_none());
         assert!(screen.pixels.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn only_the_changed_area_is_handed_over() {
+        let mut screen = Screen::default();
+        screen.resize(4, 3);
+        assert_eq!(screen.take_changes(false).map(|patch| (patch.pos, patch.size)), Some(([0, 0], [4, 3])));
+        assert!(screen.take_changes(false).is_none());
+        screen.put(rect(1, 0, 1, 1), &[7, 7, 7, 0]);
+        screen.copy(rect(2, 1, 1, 1), rect(1, 0, 1, 1));
+        let patch = screen.take_changes(false).expect("changes");
+        assert_eq!((patch.pos, patch.size), ([1, 0], [2, 2]));
+        assert_eq!(patch.pixels, [7, 7, 7, 255, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 255]);
+        // A new texture needs the whole screen even without changes.
+        assert_eq!(screen.take_changes(true).map(|patch| patch.size), Some([4, 3]));
     }
 
     #[test]
