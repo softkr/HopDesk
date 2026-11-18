@@ -51,13 +51,16 @@ eframe = "0.37"
 egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
 rfd = "0.18"
 
-# Session Dock icon and badge, clipboard bridge (the engine has no macOS clipboard backend), Reduce Motion setting
+# Session Dock icon and badge, reopening the launcher from the Dock, clipboard bridge (the engine has no macOS clipboard backend), Reduce Motion setting
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAccessibility", "NSApplication", "NSDockTile", "NSEvent", "NSImage", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSWorkspace"] }
 ironrdp-cliprdr = { path = "third_party/IronRDP/crates/ironrdp-cliprdr" }
 ironrdp-core = { path = "third_party/IronRDP/crates/ironrdp-core" }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSGeometry", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventManager", "NSArray", "NSData", "NSGeometry", "NSString", "NSURL"] }
+# A stopped session leaves the Dock before it exits: SIGTERM from the launcher, the Dock change on the main thread
+libc = "0.2"
+dispatch2 = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }

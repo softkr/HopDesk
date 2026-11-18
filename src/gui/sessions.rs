@@ -155,7 +155,7 @@ impl Sessions {
         if let Some(session) = inner.sessions.get_mut(&id) {
             session.cancelled = true;
             if let Some(child) = &session.child {
-                let _ = child.lock().map(|mut c| c.kill());
+                stop(child);
             }
         }
     }
@@ -328,6 +328,46 @@ impl Sessions {
         }
         restart
     }
+}
+
+/// How long a session asked to quit gets before it is killed (macOS).
+#[cfg(target_os = "macos")]
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// macOS: asks the session process to quit (SIGTERM), so it leaves the Dock first: a killed
+/// process stays in the Dock as a "recent app" next to the launcher. Killed after `STOP_GRACE`.
+#[cfg(target_os = "macos")]
+fn stop(child: &Arc<Mutex<Child>>) {
+    let Ok(mut process) = child.lock() else { return };
+    // Not yet reaped (checked under the lock), so the pid still names this process.
+    if !matches!(process.try_wait(), Ok(None)) {
+        return;
+    }
+    let Ok(pid) = libc::pid_t::try_from(process.id()) else {
+        let _ = process.kill();
+        return;
+    };
+    // SAFETY: kill(2) with a valid signal on the pid of our own, unreaped child.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        let _ = process.kill();
+        return;
+    }
+    drop(process);
+    let child = Arc::clone(child);
+    std::thread::spawn(move || {
+        std::thread::sleep(STOP_GRACE);
+        if let Ok(mut process) = child.lock()
+            && matches!(process.try_wait(), Ok(None))
+        {
+            tracing::warn!("Session did not quit in time, killing it");
+            let _ = process.kill();
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stop(child: &Arc<Mutex<Child>>) {
+    let _ = child.lock().map(|mut c| c.kill());
 }
 
 /// A file the session's log is copied into, one per session, when the debug bundle asks for it

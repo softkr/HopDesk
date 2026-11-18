@@ -1,7 +1,8 @@
 //! Launcher icon in the macOS menu bar / Windows notification area.
 //!
 //! Closing the launcher window only hides it, so HopDesk keeps running after an accidental close.
-//! The icon's menu opens the window again, checks for an update, or quits.
+//! The icon's menu opens the window again, checks for an update, or quits. On macOS a click on the
+//! Dock icon opens it again too.
 //!
 //! On macOS the icon only stands in for the hidden window: while the window is open, the app menu
 //! (with its own "업데이트 확인") is there instead, so the icon is hidden.
@@ -30,6 +31,9 @@ pub struct Tray {
     /// Keeps the app menu alive.
     #[cfg(target_os = "macos")]
     _app_menu: Menu,
+    /// Shows the window on a Dock icon click; the Apple event manager does not retain it.
+    #[cfg(target_os = "macos")]
+    _reopen: objc2::rc::Retained<reopen::Handler>,
 }
 
 impl Tray {
@@ -56,6 +60,11 @@ impl Tray {
         let hidden = Arc::new(AtomicBool::new(false));
         let (open_id, quit_id) = (open.id().clone(), quit.id().clone());
         let check_ids = [check.id().clone(), app_check.id().clone()];
+        #[cfg(target_os = "macos")]
+        let reopen = {
+            let (ctx, hidden) = (ctx.clone(), Arc::clone(&hidden));
+            reopen::install(move || show(&ctx, &hidden)).context("Dock reopen handler")?
+        };
         let ctx = ctx.clone();
         let (quit_flag, hidden_flag) = (Arc::clone(&quitting), Arc::clone(&hidden));
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -78,6 +87,8 @@ impl Tray {
             quitting,
             #[cfg(target_os = "macos")]
             _app_menu: app_menu,
+            #[cfg(target_os = "macos")]
+            _reopen: reopen,
         };
         tray.sync_icon();
         Ok(tray)
@@ -89,7 +100,6 @@ impl Tray {
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting.load(Ordering::Relaxed) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-            set_in_dock(false);
             self.hidden.store(true, Ordering::Relaxed);
         }
         self.sync_icon();
@@ -110,7 +120,6 @@ impl Tray {
 
 fn show(ctx: &egui::Context, hidden: &AtomicBool) {
     hidden.store(false, Ordering::Relaxed);
-    set_in_dock(true);
     ctx.send_viewport_cmd(ViewportCommand::Visible(true));
     ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(ViewportCommand::Focus);
@@ -162,24 +171,51 @@ fn icon() -> anyhow::Result<Icon> {
     Icon::from_resource(1, None).context("tray icon resource")
 }
 
-/// macOS: a hidden launcher leaves the Dock (only the menu bar icon remains), because the Dock
-/// icon could not bring the window back.
+/// The Dock icon click ("reopen" Apple event), which winit leaves unhandled.
 #[cfg(target_os = "macos")]
-fn set_in_dock(visible: bool) {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+mod reopen {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{DefinedClass as _, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2_foundation::{NSAppleEventManager, NSObject};
 
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let policy = if visible {
-        NSApplicationActivationPolicy::Regular
-    } else {
-        NSApplicationActivationPolicy::Accessory
-    };
-    NSApplication::sharedApplication(mtm).setActivationPolicy(policy);
+    /// `kCoreEventClass` / `kAEReopenApplication`.
+    const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
+    const REOPEN_APPLICATION: u32 = u32::from_be_bytes(*b"rapp");
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "HopDeskReopenHandler"]
+        #[ivars = Box<dyn Fn()>]
+        pub struct Handler;
+
+        impl Handler {
+            #[unsafe(method(handleReopen:withReplyEvent:))]
+            fn handle_reopen(&self, _event: &AnyObject, _reply: &AnyObject) {
+                (self.ivars())();
+            }
+        }
+    );
+
+    /// Calls `on_reopen` on each Dock icon click (or launch of the running app) in place of
+    /// AppKit's default, which cannot bring back a hidden window. Must run on the main thread.
+    pub fn install(on_reopen: impl Fn() + 'static) -> anyhow::Result<Retained<Handler>> {
+        let mtm = MainThreadMarker::new().ok_or_else(|| anyhow::anyhow!("not on the main thread"))?;
+        let this = Handler::alloc(mtm).set_ivars(Box::new(on_reopen) as Box<dyn Fn()>);
+        // SAFETY: NSObject's designated initializer.
+        let handler: Retained<Handler> = unsafe { msg_send![super(this), init] };
+        let manager = NSAppleEventManager::sharedAppleEventManager();
+        // SAFETY: `handler` implements the selector with the signature the manager calls.
+        unsafe {
+            let _: () = msg_send![
+                &manager,
+                setEventHandler: &*handler,
+                andSelector: sel!(handleReopen:withReplyEvent:),
+                forEventClass: CORE_EVENT_CLASS,
+                andEventID: REOPEN_APPLICATION,
+            ];
+        }
+        Ok(handler)
+    }
 }
-
-/// Windows: hiding the window already removes its taskbar button.
-#[cfg(windows)]
-fn set_in_dock(_visible: bool) {}

@@ -23,6 +23,8 @@ pub fn run(
     tunnel: Option<Arc<Tunnel>>,
     trust: Arc<TrustStore>,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    crate::dock::quit_on_terminate()?;
     match profile.protocol {
         Protocol::Rdp => {
             let password = password.context("no stored RDP password (use `set-password --rdp`)")?;

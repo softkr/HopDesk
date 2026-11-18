@@ -30,6 +30,29 @@ pub fn leave_dock() {
     NSApplication::sharedApplication(mtm).setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
 }
 
+/// Quits the session when the launcher stops it (SIGTERM), leaving the Dock first like a session
+/// whose window was closed.
+pub fn quit_on_terminate() -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .context("signal runtime")?;
+    // Registered before returning, so a stop right after launch is not missed.
+    let mut terminate = runtime.block_on(async { signal(SignalKind::terminate()) }).context("SIGTERM handler")?;
+    std::thread::spawn(move || {
+        runtime.block_on(terminate.recv());
+        // AppKit only on the main thread, which runs the session window's event loop.
+        dispatch2::DispatchQueue::main().exec_async(|| {
+            leave_dock();
+            std::process::exit(0);
+        });
+    });
+    Ok(())
+}
+
 /// The first character of the profile name; a longer badge covers the icon.
 fn badge(name: &str) -> String {
     name.trim().chars().take(1).collect()
