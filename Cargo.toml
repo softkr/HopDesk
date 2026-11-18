@@ -47,12 +47,14 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = "0.37"
+# Lucide SVG icons, rasterized by resvg at the exact pixel size
+egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
 rfd = "0.18"
 
-# Session Dock icon and badge, clipboard bridge (the engine has no macOS clipboard backend)
+# Session Dock icon and badge, clipboard bridge (the engine has no macOS clipboard backend), Reduce Motion setting
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSEvent", "NSImage", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAccessibility", "NSApplication", "NSDockTile", "NSEvent", "NSImage", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSWorkspace"] }
 ironrdp-cliprdr = { path = "third_party/IronRDP/crates/ironrdp-cliprdr" }
 ironrdp-core = { path = "third_party/IronRDP/crates/ironrdp-core" }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSGeometry", "NSString", "NSURL"] }

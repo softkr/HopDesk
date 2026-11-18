@@ -49,6 +49,8 @@ pub struct FailureInfo {
 pub struct Session {
     pub state: State,
     pub log: Vec<String>,
+    /// When the session first connected; kept through reconnects, for its uptime.
+    connected_since: Option<std::time::Instant>,
     /// Decides how failures are explained.
     protocol: Protocol,
     child: Option<Arc<Mutex<Child>>>,
@@ -83,6 +85,10 @@ impl Sessions {
         self.lock().sessions.get(&id).map(|s| s.state.clone())
     }
 
+    pub fn connected_since(&self, id: Uuid) -> Option<std::time::Instant> {
+        self.lock().sessions.get(&id).and_then(|s| s.connected_since)
+    }
+
     pub fn log(&self, id: Uuid) -> Vec<String> {
         self.lock().sessions.get(&id).map(|s| s.log.clone()).unwrap_or_default()
     }
@@ -112,7 +118,10 @@ impl Sessions {
 
     #[cfg(test)]
     pub fn set_for_test(&self, id: Uuid, state: State, log: Vec<String>) {
-        self.lock().sessions.insert(id, Session { state, log, protocol: Protocol::Rdp, child: None, cancelled: false });
+        let connected_since = (state == State::Connected).then(std::time::Instant::now);
+        self.lock()
+            .sessions
+            .insert(id, Session { state, log, connected_since, protocol: Protocol::Rdp, child: None, cancelled: false });
     }
 
     #[cfg(test)]
@@ -149,6 +158,7 @@ impl Sessions {
             Session {
                 state: State::Starting,
                 log: Vec::new(),
+                connected_since: None,
                 protocol,
                 child: Some(Arc::clone(&child)),
                 cancelled: false,
@@ -192,6 +202,9 @@ impl Sessions {
                 if let Some(next) = next
                     && !matches!(session.state, State::Failed(_))
                 {
+                    if next == State::Connected && session.connected_since.is_none() {
+                        session.connected_since = Some(std::time::Instant::now());
+                    }
                     session.state = next;
                 }
             }

@@ -5,6 +5,7 @@
 
 mod detail;
 mod form;
+mod motion;
 mod platform;
 mod sessions;
 pub(crate) mod theme;
@@ -30,19 +31,32 @@ use crate::profile::{Profile, ProfileStore};
 use crate::trust::TrustStore;
 use crate::update::{self, Release};
 
-/// Protocol and route of a profile in a few characters, e.g. `SSH · VPN 경유`.
-fn kind_tag(profile: &Profile) -> String {
-    let protocol = match profile.protocol {
+fn protocol_name(protocol: crate::profile::Protocol) -> &'static str {
+    match protocol {
         crate::profile::Protocol::Rdp => "RDP",
         crate::profile::Protocol::Ssh => "SSH",
         crate::profile::Protocol::Vnc => "VNC",
-    };
+    }
+}
+
+/// How a tunneled profile reaches its target; `None` for a direct connection.
+fn route_name(profile: &Profile) -> Option<&'static str> {
     if profile.vpn.is_some() {
-        format!("{protocol} · VPN 경유")
+        Some("VPN 경유")
     } else if profile.use_jump {
-        format!("{protocol} · 점프 호스트 경유")
+        Some("점프 호스트 경유")
     } else {
-        protocol.to_owned()
+        None
+    }
+}
+
+/// Color and wording of a session state, shared by the sidebar and the detail header.
+fn state_badge(pal: &Palette, state: &State) -> (egui::Color32, &'static str) {
+    match state {
+        State::Connected => (pal.success, "연결됨"),
+        State::Failed(_) => (pal.danger, "연결 실패"),
+        State::Reconnecting => (pal.warning, "다시 연결하는 중"),
+        _ => (pal.accent, "연결하는 중"),
     }
 }
 
@@ -59,6 +73,16 @@ fn target_noun(protocol: crate::profile::Protocol) -> &'static str {
 pub(crate) const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-256.png");
 #[cfg(not(target_os = "macos"))]
 pub(crate) const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon/icon-full-256.png");
+
+/// The app icon's small rendition, for the sidebar heading.
+const LOGO: egui::ImageSource<'static> = egui::ImageSource::Bytes {
+    uri: std::borrow::Cow::Borrowed("bytes://hopdesk/icon-small.svg"),
+    bytes: egui::load::Bytes::Static(include_bytes!("../../assets/icon/icon-small.svg")),
+};
+
+/// Dialogs grow from this scale while their backdrop darkens to this alpha.
+const DIALOG_START_SCALE: f32 = 0.96;
+const DIALOG_BACKDROP_ALPHA: u8 = 100;
 
 /// How often a running launcher looks for a newer release (it may stay in the menu bar for days).
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -78,6 +102,7 @@ pub fn run() -> anyhow::Result<()> {
         "HopDesk",
         options,
         Box::new(|cc| {
+            motion::follow_system();
             theme::apply(&cc.egui_ctx);
             #[cfg_attr(not(any(target_os = "macos", windows)), expect(unused_mut, reason = "no tray"))]
             let mut launcher = Launcher::new();
@@ -133,9 +158,21 @@ enum UpdateState {
 }
 
 struct Toast {
+    /// Stable identity while toasts above it come and go.
+    id: u64,
     text: String,
     kind: ToastKind,
+    /// When it appeared (egui time); toasts from startup show without an entrance.
+    shown: f64,
     until: f64,
+    /// When it started leaving (expired or clicked); it is dropped once faded out.
+    leaving: Option<f64>,
+}
+
+impl Toast {
+    fn new(id: u64, kind: ToastKind, text: String, shown: f64, until: f64) -> Self {
+        Self { id, text, kind, shown, until, leaving: None }
+    }
 }
 
 pub struct Launcher {
@@ -145,6 +182,7 @@ pub struct Launcher {
     search: String,
     dialog: Option<Dialog>,
     toasts: Vec<Toast>,
+    next_toast: u64,
     sessions: Sessions,
     update: Arc<Mutex<UpdateState>>,
     /// Results of update checks the user asked for, shown as toasts.
@@ -158,22 +196,17 @@ impl Launcher {
     fn new() -> Self {
         let mut toasts = Vec::new();
         let store = ProfileStore::load().unwrap_or_else(|e| {
-            toasts.push(Toast {
-                text: format!("설정 파일을 읽지 못했습니다: {e:#}"),
-                kind: ToastKind::Error,
-                until: f64::INFINITY,
-            });
+            let text = format!("설정 파일을 읽지 못했습니다: {e:#}");
+            toasts.push(Toast::new(toasts.len() as u64, ToastKind::Error, text, f64::NEG_INFINITY, f64::INFINITY));
             ProfileStore::default()
         });
         // Before any window opens: the Keychain may ask for access once per stored secret.
         if let Err(e) = store.migrate_secrets() {
-            toasts.push(Toast {
-                text: format!("저장된 비밀번호를 옮기지 못했습니다: {e:#}"),
-                kind: ToastKind::Error,
-                until: f64::INFINITY,
-            });
+            let text = format!("저장된 비밀번호를 옮기지 못했습니다: {e:#}");
+            toasts.push(Toast::new(toasts.len() as u64, ToastKind::Error, text, f64::NEG_INFINITY, f64::INFINITY));
         }
         let mut launcher = Self::with_store(store, Sessions::default());
+        launcher.next_toast = toasts.len() as u64;
         launcher.toasts = toasts;
         launcher
     }
@@ -187,6 +220,7 @@ impl Launcher {
             search: String::new(),
             dialog: None,
             toasts: Vec::new(),
+            next_toast: 0,
             sessions,
             update: Arc::new(Mutex::new(UpdateState::None)),
             update_notices: Arc::default(),
@@ -302,11 +336,8 @@ impl Launcher {
     fn toast(&mut self, ctx: &egui::Context, kind: ToastKind, text: impl Into<String>) {
         let now = ctx.input(|i| i.time);
         let secs = if kind == ToastKind::Error { 6.0 } else { 3.0 };
-        self.toasts.push(Toast {
-            text: text.into(),
-            kind,
-            until: now + secs,
-        });
+        self.toasts.push(Toast::new(self.next_toast, kind, text.into(), now, now + secs));
+        self.next_toast += 1;
     }
 
     // --- navigation ---------------------------------------------------------------------------
@@ -526,7 +557,11 @@ impl Launcher {
     fn sidebar(&mut self, ui: &mut Ui) {
         let pal = palette(ui);
         ui.horizontal(|ui| {
+            ui.add(egui::Image::new(LOGO).fit_to_exact_size(Vec2::splat(26.0)));
+            ui.add_space(2.0);
             ui.label(RichText::new("HopDesk").size(theme::TITLE_SIZE).bold().color(pal.text));
+            let version = concat!("v", env!("CARGO_PKG_VERSION"));
+            widgets::tag(ui, version, pal.text_weak, pal.surface);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::icon_button(ui, widgets::Icon::Plus, 30.0)
                     .on_hover_text(format!("새 연결  {}", platform::shortcut("N")))
@@ -539,8 +574,10 @@ impl Launcher {
         ui.add_space(6.0);
 
         if !self.store.profiles().is_empty() {
-            let search = widgets::text_input(ui, &mut self.search, &format!("검색  {}", platform::shortcut("F")), ui.available_width(), false)
-                .id(Id::unique("search"));
+            let search = widgets::text_input(ui, &mut self.search, "이름이나 주소로 검색", ui.available_width(), false)
+                .id(Id::unique("search"))
+                .leading_icon(widgets::Icon::Search)
+                .shortcut(platform::shortcut("F"));
             let response = ui.add(search);
             if response.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
                 self.search.clear();
@@ -552,15 +589,35 @@ impl Launcher {
         self.update_card(ui);
 
         let list: Vec<Profile> = self.filtered().into_iter().cloned().collect();
+        if !self.store.profiles().is_empty() {
+            let open = self.store.profiles().iter().filter(|p| self.sessions.state(p.id) == Some(State::Connected)).count();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("연결 · {}", self.store.profiles().len())).small().bold().color(pal.text_weak));
+                if open > 0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{open}개 사용 중")).small().color(pal.success));
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 3.0, pal.success);
+                    });
+                }
+            });
+            ui.add_space(2.0);
+        }
         let mut clicked = None;
         let mut double = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
+            // Painted under the rows once their positions are known, so it can slide between them.
+            let highlight = ui.painter().add(egui::Shape::Noop);
+            let mut selected_row = None;
             for p in &list {
                 let state = self.sessions.state(p.id);
                 let selected = self.selected == Some(p.id) && matches!(self.view, View::Detail)
                     || matches!(&self.view, View::Edit { form, .. } if form.id == Some(p.id));
                 let response = list_row(ui, &pal, p, selected, state.as_ref());
+                if selected {
+                    selected_row = Some(response.rect);
+                }
                 if response.clicked() {
                     clicked = Some(p.id);
                 }
@@ -568,6 +625,7 @@ impl Launcher {
                     double = Some(p.id);
                 }
             }
+            paint_selection(ui, &pal, highlight, selected_row);
             if list.is_empty() && !self.store.profiles().is_empty() {
                 ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
@@ -586,7 +644,16 @@ impl Launcher {
         }
     }
 
+    /// The main pane; switching between connections, the editor and the empty state cross-fades.
     fn main(&mut self, ui: &mut Ui) {
+        let key = match &self.view {
+            View::Edit { form, .. } => ("edit", form.id),
+            View::Detail => ("detail", self.selected),
+        };
+        motion::fade_in(ui, Id::unique("main_view"), key, |ui| self.main_view(ui));
+    }
+
+    fn main_view(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         match &mut self.view {
             View::Edit { form, .. } => match form.ui(ui, &self.store) {
@@ -606,7 +673,8 @@ impl Launcher {
                     .shared_folder()
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| crate::shared_folder::default_path().unwrap_or_default());
-                match detail::ui(ui, &profile, state.as_ref(), &log, &shared_folder) {
+                let since = self.sessions.connected_since(profile.id);
+                match detail::ui(ui, &profile, state.as_ref(), since, &log, &shared_folder) {
                     detail::Action::Connect => self.connect(&ctx, profile.id),
                     detail::Action::Cancel => self.sessions.cancel(profile.id),
                     detail::Action::Dismiss => self.sessions.dismiss(profile.id),
@@ -651,7 +719,7 @@ impl Launcher {
                         .color(pal.text_weak),
                 );
                 ui.add_space(16.0);
-                if widgets::large_primary_button(ui, "새 연결 만들기", 200.0).clicked() {
+                if widgets::hero_button(ui, widgets::Icon::Plus, "새 연결 만들기", Some(&platform::shortcut("N")), 240.0).clicked() {
                     self.navigate(Nav::New);
                 }
             } else {
@@ -661,6 +729,7 @@ impl Launcher {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        let shown = motion::toggle(ctx, Id::unique("dialog_shown"), self.dialog.is_some(), motion::BASE);
         let Some(dialog) = self.dialog else { return };
         let (title, body, confirm, danger) = match dialog {
             Dialog::Delete(id) => (
@@ -695,7 +764,10 @@ impl Launcher {
 
         let mut confirmed = false;
         let mut cancelled = false;
-        let modal = egui::Modal::new(Id::unique("dialog")).show(ctx, |ui| {
+        // The backdrop fades on its own layer, so the dialog can grow into place without it.
+        let backdrop = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, Id::unique("dialog_backdrop")));
+        backdrop.rect_filled(ctx.content_rect(), 0.0, egui::Color32::from_black_alpha(DIALOG_BACKDROP_ALPHA).gamma_multiply(shown));
+        let modal = egui::Modal::new(Id::unique("dialog")).backdrop_color(egui::Color32::TRANSPARENT).show(ctx, |ui| {
             let pal = palette(ui);
             ui.set_width(380.0);
             ui.label(RichText::new(&title).size(16.0).bold().color(pal.text));
@@ -720,6 +792,12 @@ impl Launcher {
         if modal.should_close() {
             cancelled = true;
         }
+        let scale = 1.0 - (1.0 - DIALOG_START_SCALE) * (1.0 - shown) * motion::travel();
+        let center = modal.response.rect.center().to_vec2();
+        let grow = egui::emath::TSTransform::from_translation(center)
+            * egui::emath::TSTransform::from_scaling(scale)
+            * egui::emath::TSTransform::from_translation(-center);
+        ctx.set_transform_layer(modal.response.layer_id, grow);
 
         if confirmed {
             self.dialog = None;
@@ -733,30 +811,50 @@ impl Launcher {
         }
     }
 
+    /// Toasts stack up from the bottom-right corner. Each one rises and fades in, fades out when it
+    /// expires or is clicked, and the others glide into the space it leaves.
     fn draw_toasts(&mut self, ctx: &egui::Context) {
+        const GAP: f32 = 8.0;
+        const RISE: f32 = 16.0;
         let now = ctx.input(|i| i.time);
-        self.toasts.retain(|t| t.until > now);
+        let leave_secs = motion::BASE;
+        for toast in &mut self.toasts {
+            if toast.leaving.is_none() && toast.until <= now {
+                toast.leaving = Some(now);
+            }
+        }
+        // A faded-out toast is gone; without motion it goes at once.
+        self.toasts
+            .retain(|t| t.leaving.is_none_or(|left| motion::since(ctx, left, leave_secs) < 1.0));
         if self.toasts.is_empty() {
             return;
         }
-        let next = self.toasts.iter().map(|t| t.until).fold(f64::INFINITY, f64::min);
+        let next = self.toasts.iter().filter(|t| t.leaving.is_none()).map(|t| t.until).fold(f64::INFINITY, f64::min);
         if next.is_finite() {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64((next - now).max(0.05)));
         }
 
+        let mut stack = 0.0;
         let mut close = None;
-        egui::Area::new(Id::unique("toasts"))
-            .anchor(Align2::RIGHT_BOTTOM, Vec2::new(-20.0, -20.0))
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                let pal = palette(ui);
-                for (i, toast) in self.toasts.iter().enumerate() {
-                    let color = match toast.kind {
-                        ToastKind::Success => pal.success,
-                        ToastKind::Info => pal.accent,
-                        ToastKind::Error => pal.danger,
+        for (i, toast) in self.toasts.iter().enumerate().rev() {
+            let appear = motion::since(ctx, toast.shown, motion::SLOW);
+            let leave = toast.leaving.map_or(0.0, |left| motion::since(ctx, left, leave_secs));
+            let y = motion::value(ctx, Id::unique(("toast_y", toast.id)), stack, motion::movement(motion::BASE));
+            let rise = (1.0 - appear) * RISE * motion::travel();
+            let area = egui::Area::new(Id::unique(("toast", toast.id)))
+                .anchor(Align2::RIGHT_BOTTOM, Vec2::new(-20.0, -20.0 - y + rise))
+                .order(egui::Order::Foreground)
+                .fade_in(false)
+                .interactable(toast.leaving.is_none())
+                .show(ctx, |ui| {
+                    ui.multiply_opacity(appear * (1.0 - leave));
+                    let pal = palette(ui);
+                    let (color, icon) = match toast.kind {
+                        ToastKind::Success => (pal.success, widgets::Icon::Success),
+                        ToastKind::Info => (pal.accent, widgets::Icon::Info),
+                        ToastKind::Error => (pal.danger, widgets::Icon::Alert),
                     };
-                    let frame = egui::Frame::new()
+                    egui::Frame::new()
                         .fill(pal.surface)
                         .stroke(Stroke::new(1.0, pal.border))
                         .corner_radius(CornerRadius::same(theme::FLOAT_RADIUS))
@@ -766,26 +864,27 @@ impl Launcher {
                             spread: 0,
                             color: egui::Color32::from_black_alpha(40),
                         })
-                        .inner_margin(Margin::symmetric(14, 10));
-                    let response = frame
+                        .inner_margin(Margin::symmetric(14, 10))
                         .show(ui, |ui| {
                             ui.set_max_width(360.0);
                             ui.horizontal(|ui| {
-                                let (rect, _) = ui.allocate_exact_size(Vec2::new(4.0, 18.0), Sense::hover());
-                                ui.painter().rect_filled(rect, CornerRadius::same(2), color);
+                                ui.add(icon.image(widgets::ICON_MD, color));
                                 ui.add(egui::Label::new(RichText::new(&toast.text).color(pal.text)).wrap());
                             });
                         })
                         .response
-                        .interact(Sense::click());
-                    if response.clicked() {
-                        close = Some(i);
-                    }
-                    ui.add_space(6.0);
-                }
-            });
+                        .interact(Sense::click())
+                });
+            if area.inner.clicked() {
+                close = Some(i);
+            }
+            if toast.leaving.is_none() {
+                stack += area.response.rect.height() + GAP;
+            }
+        }
         if let Some(i) = close {
-            self.toasts.remove(i);
+            self.toasts[i].leaving = Some(now);
+            ctx.request_repaint();
         }
     }
 }
@@ -843,66 +942,80 @@ fn offer_release(state: &mut UpdateState, release: Release) {
     }
 }
 
-/// One profile in the sidebar: avatar, name, target, session status.
+/// One profile in the sidebar: its monogram, the name with the session state right after it, and
+/// the address with the protocol as a small badge. The selected row shows a chevron.
 fn list_row(ui: &mut Ui, pal: &Palette, p: &Profile, selected: bool, state: Option<&State>) -> egui::Response {
-    let height = 56.0;
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
+    const HEIGHT: f32 = 60.0;
+    const TILE: f32 = 36.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), HEIGHT), Sense::click());
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &p.name));
+    let ctx = ui.ctx().clone();
 
-    if selected {
-        ui.painter().rect_filled(rect, CornerRadius::same(8), pal.accent_soft);
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(8), pal.subtle);
+    // The selected row's background is the sliding highlight (`paint_selection`).
+    let hover = motion::toggle(&ctx, response.id.with("hover"), response.hovered() && !selected, motion::FAST);
+    if hover > 0.0 {
+        ui.painter().rect_filled(rect, CornerRadius::same(ROW_RADIUS), pal.subtle.gamma_multiply(hover));
     }
 
-    let avatar_r = 17.0;
-    let avatar_c = Pos2::new(rect.left() + 10.0 + avatar_r, rect.center().y);
-    widgets::paint_avatar(ui, avatar_c, avatar_r, &p.name);
+    let tile = Rect::from_min_size(Pos2::new(rect.left() + 12.0, rect.center().y - TILE / 2.0), Vec2::splat(TILE));
+    widgets::paint_monogram(ui, tile, &p.name, selected);
 
     // Shape differs per state, so it does not rely on color alone.
     #[derive(Clone, Copy)]
     enum Mark {
         Dot,
-        Ring,
+        Spinner,
         Alert,
     }
-    let dot = state.map(|s| match s {
-        State::Connected => (pal.success, "연결됨", Mark::Dot),
-        State::Failed(_) => (pal.danger, "연결 실패", Mark::Alert),
-        State::Reconnecting => (pal.warning, "다시 연결하는 중", Mark::Ring),
-        _ => (pal.accent, "연결하는 중", Mark::Ring),
+    let mark = state.map(|s| {
+        let (color, label) = state_badge(pal, s);
+        let mark = match s {
+            State::Connected => Mark::Dot,
+            State::Failed(_) => Mark::Alert,
+            _ => Mark::Spinner,
+        };
+        (color, label, mark)
     });
-    let text_left = avatar_c.x + avatar_r + 10.0;
-    let text_right = rect.right() - if dot.is_some() { 26.0 } else { 10.0 };
+    // A session reaching its end state pops or fades its mark in, so the change catches the eye.
+    let connected = motion::pop(&ctx, Id::unique(("mark_connected", p.id)), matches!(state, Some(State::Connected)), motion::SLOW);
+    let failed = motion::toggle(&ctx, Id::unique(("mark_failed", p.id)), matches!(state, Some(State::Failed(_))), motion::BASE);
+
+    const MARK_ROOM: f32 = 22.0;
+    let text_left = tile.right() + 12.0;
+    let text_right = rect.right() - if selected { 30.0 } else { 12.0 };
     let max_w = (text_right - text_left).max(20.0);
-
-    let name = single_line(ui, &p.name, FontId::new(14.0, bold_family()), pal.text, max_w);
-    // A VNC profile without a user logs on with the VNC password.
-    let protocol = kind_tag(p);
-    let protocol = protocol.split(' ').next().unwrap_or_default();
-    let sub_text = match p.target.user.as_str() {
-        "" => format!("{protocol} · {}", p.target.host),
-        user => format!("{protocol} · {user}@{}", p.target.host),
-    };
-    let sub = single_line(ui, &sub_text, FontId::proportional(13.0), pal.text_weak, max_w);
-    let total = name.size().y + 2.0 + sub.size().y;
+    let name = single_line(ui, &p.name, FontId::new(14.0, bold_family()), pal.text, max_w - MARK_ROOM);
+    let mono = FontId::monospace(11.5);
+    let protocol = protocol_name(p.protocol);
+    let badge = widgets::tag_size(ui, protocol, &FontId::monospace(10.0));
+    let address = format!("{}:{}", p.target.host, p.target.port);
+    let address = single_line(ui, &address, mono, pal.text_weak, max_w - badge.x - 8.0);
+    let total = name.size().y + 5.0 + address.size().y;
     let top = rect.center().y - total / 2.0;
-    ui.painter().galley(Pos2::new(text_left, top), name.clone(), pal.text);
-    ui.painter().galley(Pos2::new(text_left, top + name.size().y + 2.0), sub, pal.text_weak);
+    let name_size = name.size();
+    ui.painter().galley(Pos2::new(text_left, top), name, pal.text);
+    let line2 = top + name_size.y + 5.0;
+    let address_size = address.size();
+    ui.painter().galley(Pos2::new(text_left, line2), address, pal.text_weak);
+    let badge_rect = Rect::from_min_size(Pos2::new(text_left + address_size.x + 8.0, line2 + (address_size.y - badge.y) / 2.0), badge);
+    let (badge_text, badge_fill, badge_stroke) = if selected {
+        (pal.accent, pal.accent_soft, pal.accent.gamma_multiply(0.3))
+    } else {
+        (pal.text_weak, pal.subtle, pal.subtle)
+    };
+    widgets::paint_tag(ui, badge_rect, protocol, FontId::monospace(10.0), badge_text, badge_fill, badge_stroke);
 
-    if let Some((color, label, mark)) = dot {
-        let c = Pos2::new(rect.right() - 15.0, rect.center().y);
+    if let Some((color, label, mark)) = mark {
+        let c = Pos2::new(text_left + name_size.x + 11.0, top + name_size.y / 2.0);
         match mark {
             Mark::Dot => {
-                ui.painter().circle_filled(c, 5.0, color);
+                ui.painter().circle_filled(c, 4.0 * connected, color);
             }
-            Mark::Ring => {
-                ui.painter().circle_stroke(c, 4.5, Stroke::new(2.0, color));
+            Mark::Spinner => {
+                egui::Spinner::new().color(color).paint_at(ui, Rect::from_center_size(c, Vec2::splat(12.0)));
             }
             Mark::Alert => {
-                ui.painter().circle_filled(c, 7.0, color);
-                let font = FontId::new(11.0, bold_family());
-                ui.painter().text(c, Align2::CENTER_CENTER, "!", font, pal.surface);
+                widgets::paint_icon(ui, widgets::Icon::Alert, c, 15.0, color.gamma_multiply(failed));
             }
         }
         let hit = Rect::from_center_size(c, Vec2::splat(18.0));
@@ -910,11 +1023,46 @@ fn list_row(ui: &mut Ui, pal: &Palette, p: &Profile, selected: bool, state: Opti
             response.clone().on_hover_text(label);
         }
     }
+    if selected {
+        widgets::paint_icon(ui, widgets::Icon::Chevron, Pos2::new(rect.right() - 16.0, rect.center().y), widgets::ICON_SM, pal.text_weak);
+    }
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     response
 }
+
+/// The selected row's background. It slides to a newly selected row and fades out where it was
+/// when nothing in the list is selected. Positions are relative to the list, so scrolling moves
+/// it with the rows instead of animating.
+fn paint_selection(ui: &Ui, pal: &Palette, slot: egui::layers::ShapeIdx, row: Option<Rect>) {
+    let ctx = ui.ctx();
+    let origin = Vec2::new(0.0, ui.min_rect().top());
+    let shown = motion::toggle(ctx, Id::unique("selection_shown"), row.is_some(), motion::FAST);
+    let last = Id::unique("selection_row");
+    let target = match row {
+        Some(row) => {
+            let target = row.translate(-origin);
+            ctx.data_mut(|d| d.insert_temp(last, target));
+            target
+        }
+        None => match ctx.data(|d| d.get_temp::<Rect>(last)) {
+            Some(target) => target,
+            None => return,
+        },
+    };
+    let top = motion::value(ctx, Id::unique("selection_top"), target.top(), motion::movement(motion::BASE));
+    if shown > 0.0 {
+        let rect = Rect::from_min_size(Pos2::new(target.left(), top), target.size()).translate(origin);
+        let fill = pal.surface.lerp_to_gamma(pal.accent_soft, 0.7).gamma_multiply(shown);
+        let stroke = Stroke::new(1.0, pal.accent.gamma_multiply(0.5 * shown));
+        let shape = egui::epaint::RectShape::new(rect, CornerRadius::same(ROW_RADIUS), fill, stroke, egui::StrokeKind::Inside);
+        ui.painter().set(slot, shape);
+    }
+}
+
+/// Corner radius of sidebar rows and their highlight.
+const ROW_RADIUS: u8 = 10;
 
 fn single_line(ui: &Ui, text: &str, font: FontId, color: egui::Color32, max_w: f32) -> std::sync::Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::single_section(text.to_owned(), egui::TextFormat::simple(font, color));

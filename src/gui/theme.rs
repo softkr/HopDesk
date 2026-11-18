@@ -130,8 +130,13 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
 
 pub fn apply(ctx: &egui::Context) {
     install_fonts(ctx);
+    // Icons are SVGs (see `widgets::Icon`).
+    egui_extras::install_image_loaders(ctx);
     for (theme, pal) in [(Theme::Light, LIGHT), (Theme::Dark, DARK)] {
         ctx.style_mut_of(theme, |style| {
+            // egui's own transitions (fades of areas and popups) match ours.
+            style.animation_time = super::motion::BASE;
+
             style.text_styles = [
                 (TextStyle::Small, FontId::new(13.0, FontFamily::Proportional)),
                 (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
