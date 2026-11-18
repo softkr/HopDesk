@@ -115,8 +115,13 @@ fn screenshots() {
 
     // 5. Connected
     sessions.set_for_test(ids[0], State::Connected, vec![]);
+    let samples: Vec<(f64, f64)> = (0..45).map(|i| (4.0e6 + 3.0e6 * (f64::from(i) * 0.4).sin(), 3.0e5 + 2.0e5 * (f64::from(i) * 0.9).cos())).collect();
+    sessions.set_traffic_for_test(ids[0], &samples);
+    sessions.set_latency_for_test(ids[0], std::time::Duration::from_micros(12_400));
     let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(profiles.clone()), sessions.clone()), true);
     shot(&mut h, "05-connected-dark");
+    let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(profiles.clone()), sessions.clone()), false);
+    shot(&mut h, "05-connected");
 
     // 6. New connection form after a save attempt with missing fields
     let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(profiles.clone()), Sessions::default()), false);

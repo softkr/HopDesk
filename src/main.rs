@@ -30,6 +30,7 @@ mod profile;
 mod secret_store;
 mod session;
 mod shared_folder;
+mod stats;
 mod status;
 mod terminal;
 mod trust;

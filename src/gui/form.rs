@@ -143,6 +143,8 @@ pub enum Action {
     None,
     Save,
     Cancel,
+    OpenSharedFolder,
+    PickSharedFolder,
 }
 
 impl Form {
@@ -534,7 +536,8 @@ impl Form {
     }
 
     /// Draws the form. `store` is used for live re-validation after a failed save.
-    pub fn ui(&mut self, ui: &mut Ui, store: &ProfileStore) -> Action {
+    /// `shared_folder` is the app-wide folder shared with RDP sessions; changing it applies at once.
+    pub fn ui(&mut self, ui: &mut Ui, store: &ProfileStore, shared_folder: &std::path::Path) -> Action {
         let pal = palette(ui);
         let mut action = Action::None;
 
@@ -547,7 +550,7 @@ impl Form {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(if self.is_new() { "새 연결" } else { "연결 편집" }).size(super::theme::HEADING_SIZE).bold());
+                ui.label(RichText::new(if self.is_new() { "새 연결" } else { "연결 설정" }).size(super::theme::HEADING_SIZE).bold());
                 ui.label(
                     RichText::new("원격 PC나 서버에 직접, SSH 점프 호스트나 VPN을 거쳐 접속합니다.").color(pal.text_weak),
                 );
@@ -792,7 +795,7 @@ impl Form {
             // Screen settings apply to the remote desktop only.
             if self.protocol == Protocol::Rdp {
                 card(ui, |ui| {
-                    section_title(ui, "화면", None);
+                    section_title(ui, "세션", None);
                     field(ui, "해상도", err(Field::Resolution), |ui| {
                         ui.horizontal(|ui| {
                             let fixed = self.display == DisplayMode::Fixed;
@@ -841,6 +844,21 @@ impl Form {
                                 ui.label(RichText::new(format!("{shortcut}로 창 모드 전환")).small().color(pal.text_weak));
                             }
                         });
+                    });
+                    field(ui, "공유 폴더", None, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(display_path(shared_folder)).color(pal.text));
+                            ui.add_space(4.0);
+                            if ui.button("열기").clicked() {
+                                action = Action::OpenSharedFolder;
+                            }
+                            if ui.button("변경…").clicked() {
+                                action = Action::PickSharedFolder;
+                            }
+                        });
+                        ui.label(
+                            RichText::new("모든 원격 데스크톱 연결이 함께 쓰며, 변경은 바로 적용됩니다.").small().color(pal.text_weak),
+                        );
                     });
                 });
             }

@@ -62,6 +62,39 @@ pub fn emit(phase: Phase, detail: &str) {
     }
 }
 
+/// What follows [`PREFIX`] on a traffic report: `stats\t<bytes received> <bytes sent>`.
+const STATS: &str = "stats\t";
+
+/// Reports the session's traffic totals when running under the launcher; no-op otherwise.
+pub fn emit_stats(received: u64, sent: u64) {
+    if std::env::var_os(ENV_VAR).is_some() {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "{PREFIX}{STATS}{received} {sent}");
+    }
+}
+
+/// What follows [`PREFIX`] on a latency report: `latency\t<microseconds>`.
+const LATENCY: &str = "latency\t";
+
+/// Reports the round trip to the tunnel's far end when running under the launcher.
+pub fn emit_latency(latency: std::time::Duration) {
+    if std::env::var_os(ENV_VAR).is_some() {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "{PREFIX}{LATENCY}{}", latency.as_micros());
+    }
+}
+
+pub fn parse_latency(line: &str) -> Option<std::time::Duration> {
+    let micros = line.strip_prefix(PREFIX)?.strip_prefix(LATENCY)?;
+    Some(std::time::Duration::from_micros(micros.parse().ok()?))
+}
+
+/// Parses a traffic report into `(received, sent)` byte totals.
+pub fn parse_stats(line: &str) -> Option<(u64, u64)> {
+    let (received, sent) = line.strip_prefix(PREFIX)?.strip_prefix(STATS)?.split_once(' ')?;
+    Some((received.parse().ok()?, sent.parse().ok()?))
+}
+
 /// Parses a stderr line; `None` for ordinary log output.
 pub fn parse(line: &str) -> Option<(Phase, String)> {
     let rest = line.strip_prefix(PREFIX)?;
@@ -77,5 +110,15 @@ mod tests {
     fn remote_phase_round_trips_and_accepts_the_old_name() {
         assert_eq!(Phase::parse(Phase::Remote.as_str()), Some(Phase::Remote));
         assert_eq!(parse("@hopdesk rdp\t"), Some((Phase::Remote, String::new())));
+    }
+
+    #[test]
+    fn a_traffic_report_is_not_a_phase() {
+        assert_eq!(parse_stats("@hopdesk stats\t1024 16"), Some((1024, 16)));
+        assert_eq!(parse("@hopdesk stats\t1024 16"), None);
+        assert_eq!(parse_stats("@hopdesk connected\t"), None);
+        assert_eq!(parse_stats("@hopdesk stats\tmany few"), None);
+        assert_eq!(parse_latency("@hopdesk latency\t12500"), Some(std::time::Duration::from_micros(12_500)));
+        assert_eq!(parse("@hopdesk latency\t12500"), None);
     }
 }

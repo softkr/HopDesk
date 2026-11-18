@@ -38,6 +38,7 @@ pub fn run(
     if let Some(tunnel) = &tunnel {
         status::emit(Phase::Ssh, "");
         rt.block_on(tunnel.ensure_connected())?;
+        rt.spawn(Arc::clone(tunnel).report_latency());
     }
     status::emit(Phase::Remote, "");
     let (handle, channel) = rt.block_on(open_shell(profile, password.as_deref(), tunnel, trust))?;

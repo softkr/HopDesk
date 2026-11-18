@@ -302,6 +302,11 @@ impl Engine {
         }
     }
 
+    /// The round trip of the last handshake.
+    fn latency(&self) -> Option<Duration> {
+        self.tunn.stats().4.map(|ms| Duration::from_millis(u64::from(ms)))
+    }
+
     /// Whether a handshake completed, so traffic can flow.
     fn is_established(&self) -> bool {
         self.tunn.time_since_last_handshake().is_some()
@@ -394,6 +399,8 @@ fn smol_now(started: std::time::Instant) -> SmolInstant {
 /// A request to the driver task.
 enum Command {
     Open { remote: SocketAddr, reply: oneshot::Sender<io::Result<DuplexStream>> },
+    /// The round trip to the peer, as measured by the last WireGuard handshake.
+    Latency { reply: oneshot::Sender<Option<Duration>> },
 }
 
 /// A running VPN connection.
@@ -489,6 +496,16 @@ impl Vpn {
     }
 }
 
+impl Vpn {
+    /// The round trip to the VPN peer; `None` while the VPN is down or before it is known.
+    pub async fn latency(&self) -> Option<Duration> {
+        let commands = self.link.lock().await.as_ref().filter(|link| link.is_alive())?.commands.clone();
+        let (reply, answer) = oneshot::channel();
+        commands.send(Command::Latency { reply }).await.ok()?;
+        answer.await.ok()?
+    }
+}
+
 /// One TCP connection of the engine, with the channels to its stream.
 enum Conn {
     /// Waiting for the TCP handshake; the caller gets its stream once it completes.
@@ -578,6 +595,9 @@ async fn drive(
                         let _ = reply.send(Err(io::Error::other(format!("{e:#}"))));
                     }
                 },
+                Some(Command::Latency { reply }) => {
+                    let _ = reply.send(engine.latency());
+                }
                 // The `Link` was dropped.
                 None => return,
             },

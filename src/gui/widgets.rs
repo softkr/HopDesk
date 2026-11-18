@@ -303,6 +303,35 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32) -> Response {
     response
 }
 
+/// [`icon_button`] with a label after the icon: the same height, hover fill and contrast, for a
+/// header action that sits next to one.
+pub fn quiet_button(ui: &mut Ui, icon: Icon, text: &str, height: f32) -> Response {
+    const PAD_X: f32 = 8.0;
+    const GAP: f32 = 6.0;
+    let pal = palette(ui);
+    let label = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(13.5), Color32::PLACEHOLDER);
+    let width = PAD_X * 2.0 + ICON_SM + GAP + label.size().x;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    let ctx = ui.ctx();
+    let hover = motion::toggle(ctx, response.id.with("hover"), response.hovered(), motion::FAST);
+    let press = motion::toggle(ctx, response.id.with("press"), response.is_pointer_button_down_on(), motion::FAST);
+    if hover > 0.0 {
+        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), pal.subtle.gamma_multiply(hover));
+    }
+    if press > 0.0 {
+        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), Color32::from_black_alpha(20).gamma_multiply(press));
+    }
+    let color = pal.text_weak.lerp_to_gamma(pal.text, hover);
+    let icon_center = egui::Pos2::new(rect.left() + PAD_X + ICON_SM / 2.0, rect.center().y);
+    paint_icon(ui, icon, icon_center, ICON_SM, color);
+    let text_pos = egui::Pos2::new(rect.left() + PAD_X + ICON_SM + GAP, rect.center().y - label.size().y / 2.0);
+    ui.painter().galley(text_pos, label, color);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
 /// Round tinted disc with a centered icon, for empty states and hero illustrations.
 pub fn icon_badge(ui: &mut Ui, icon: Icon, diameter: f32) {
     let pal = palette(ui);
@@ -434,75 +463,6 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
     changed
 }
 
-/// Facts about a connection, grouped under small headings: one row per fact with an icon, a label
-/// column and the value, rows divided by hairlines that start at the label (like a settings list).
-pub struct Facts<'u> {
-    ui: &'u mut Ui,
-    pal: Palette,
-    rows: usize,
-}
-
-const FACT_HEIGHT: f32 = 32.0;
-const FACT_LABEL_WIDTH: f32 = 120.0;
-const FACT_ICON_GAP: f32 = 12.0;
-
-/// A titled group of fact rows; groups after the first are set apart by space.
-pub fn fact_group(ui: &mut Ui, title: &str, add_rows: impl FnOnce(&mut Facts<'_>)) {
-    let pal = palette(ui);
-    ui.add_space(12.0);
-    ui.label(RichText::new(title).small().bold().color(pal.text_weak));
-    ui.add_space(2.0);
-    // An inset box a shade off the card, like a grouped settings list.
-    Frame::new()
-        .fill(pal.bg)
-        .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(CornerRadius::same(RADIUS + 2))
-        .inner_margin(Margin::symmetric(14, 0))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 0.0;
-            add_rows(&mut Facts { ui, pal, rows: 0 });
-        });
-}
-
-impl Facts<'_> {
-    pub fn row(&mut self, icon: Icon, label: &str, value: &str) {
-        self.row_with(icon, label, value, |_| {});
-    }
-
-    /// A row with quiet actions at its right end. A long value is cut short, in full on hover.
-    pub fn row_with(&mut self, icon: Icon, label: &str, value: &str, actions: impl FnOnce(&mut Ui)) {
-        let pal = self.pal;
-        let ui = &mut *self.ui;
-        let left = ui.cursor().left();
-        let top = ui.cursor().top();
-        if self.rows > 0 {
-            let x = left + ICON_SM + FACT_ICON_GAP;
-            ui.painter().hline(x..=ui.max_rect().right(), top, Stroke::new(1.0, pal.border));
-        }
-        self.rows += 1;
-        let size = Vec2::new(ui.available_width(), FACT_HEIGHT);
-        ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.set_min_size(size);
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add(icon.image(ICON_SM, pal.text_weak));
-            ui.add_space(FACT_ICON_GAP);
-            let label_size = Vec2::new(FACT_LABEL_WIDTH, FACT_HEIGHT);
-            ui.allocate_ui_with_layout(label_size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.set_min_size(label_size);
-                ui.add(egui::Label::new(RichText::new(label).color(pal.text_weak)).truncate());
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                actions(ui);
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add(egui::Label::new(RichText::new(value).color(pal.text)).truncate());
-                });
-            });
-        });
-    }
-}
-
 /// Icon sizes: inline with body text, standalone controls, hero spots.
 pub const ICON_SM: f32 = 16.0;
 pub const ICON_MD: f32 = 20.0;
@@ -513,20 +473,18 @@ pub const ICON_MD: f32 = 20.0;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Laptop,
-    /// Accounts.
-    User,
-    /// VPN addresses.
-    Network,
-    /// Display size.
-    Ratio,
     /// How the target is reached.
     Route,
     /// The selected row in a list.
     Chevron,
     /// Ending a session.
     Power,
-    /// Facts about a connection.
-    List,
+    /// Starting a session over.
+    Refresh,
+    /// Live traffic.
+    Activity,
+    /// A connection's settings.
+    Settings,
     /// Cancel.
     Close,
     /// SSH jump host.
@@ -539,12 +497,10 @@ pub enum Icon {
     Check,
     Plus,
     Ellipsis,
-    Pencil,
     Plug,
     Key,
     Trash,
     Copy,
-    Folder,
     Search,
     Success,
     Info,
@@ -564,13 +520,12 @@ impl Icon {
     fn source(self) -> egui::ImageSource<'static> {
         match self {
             Icon::Laptop => lucide!("laptop"),
-            Icon::User => lucide!("user-round"),
-            Icon::Network => lucide!("network"),
-            Icon::Ratio => lucide!("ratio"),
             Icon::Route => lucide!("route"),
             Icon::Chevron => lucide!("chevron-right"),
             Icon::Power => lucide!("power"),
-            Icon::List => lucide!("list"),
+            Icon::Refresh => lucide!("refresh-cw"),
+            Icon::Activity => lucide!("activity"),
+            Icon::Settings => lucide!("sliders-horizontal"),
             Icon::Close => lucide!("x"),
             Icon::Server => lucide!("server"),
             Icon::Shield => lucide!("shield-check"),
@@ -579,12 +534,10 @@ impl Icon {
             Icon::Check => lucide!("check"),
             Icon::Plus => lucide!("plus"),
             Icon::Ellipsis => lucide!("ellipsis-vertical"),
-            Icon::Pencil => lucide!("pencil"),
             Icon::Plug => lucide!("plug"),
             Icon::Key => lucide!("key-round"),
             Icon::Trash => lucide!("trash-2"),
             Icon::Copy => lucide!("copy"),
-            Icon::Folder => lucide!("folder-open"),
             Icon::Search => lucide!("search"),
             Icon::Success => lucide!("circle-check"),
             Icon::Info => lucide!("info"),

@@ -42,6 +42,7 @@ pub fn run(
     if let Some(tunnel) = &tunnel {
         status::emit(Phase::Ssh, "");
         rt.block_on(tunnel.ensure_connected())?;
+        rt.spawn(Arc::clone(tunnel).report_latency());
     }
     status::emit(Phase::Remote, "");
 

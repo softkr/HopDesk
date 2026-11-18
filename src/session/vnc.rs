@@ -55,6 +55,7 @@ pub fn run(profile: &Profile, password: Option<String>, tunnel: Option<Arc<Tunne
     if let Some(tunnel) = &tunnel {
         status::emit(Phase::Ssh, "");
         rt.block_on(tunnel.ensure_connected())?;
+        rt.spawn(Arc::clone(tunnel).report_latency());
     }
     status::emit(Phase::Remote, "");
     let client = rt.block_on(async {
@@ -66,7 +67,7 @@ pub fn run(profile: &Profile, password: Option<String>, tunnel: Option<Arc<Tunne
                     .await
                     .context("TCP connect to VNC target")?;
                 stream.set_nodelay(true)?;
-                handshake(stream, password, ard_user).await
+                handshake(crate::stats::Counted::new(stream), password, ard_user).await
             }
         }
     })?;

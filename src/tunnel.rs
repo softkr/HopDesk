@@ -13,6 +13,7 @@ use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_s
 use tokio::io::DuplexStream;
 use tracing::{error, info, warn};
 
+use crate::stats::Counted;
 use crate::trust::{Kind, TrustStore, Verdict};
 use crate::vpn::{Vpn, VpnParams};
 
@@ -144,15 +145,35 @@ impl Tunnel {
         }
     }
 
-    /// Opens a stream to `host:port` on the far side. Re-establishes the tunnel when it was
-    /// closed, so auto-reconnect keeps working.
-    pub async fn open(&self, host: &str, port: u16) -> io::Result<DuplexStream> {
-        match &self.route {
-            Route::Jump(jump) => jump.open(host, port).await,
-            Route::Vpn(vpn) => vpn.open(host, port).await,
+    /// Reports the round trip to the tunnel's far end to the launcher for as long as the session
+    /// lives. A tunnel that is down or does not answer is skipped until it does.
+    pub async fn report_latency(self: Arc<Self>) {
+        loop {
+            let latency = match &self.route {
+                Route::Jump(jump) => jump.latency().await,
+                Route::Vpn(vpn) => vpn.latency().await,
+            };
+            if let Some(latency) = latency {
+                crate::status::emit_latency(latency);
+            }
+            tokio::time::sleep(LATENCY_INTERVAL).await;
         }
     }
+
+    /// Opens a stream to `host:port` on the far side. Re-establishes the tunnel when it was
+    /// closed, so auto-reconnect keeps working.
+    pub async fn open(&self, host: &str, port: u16) -> io::Result<Counted<DuplexStream>> {
+        let stream = match &self.route {
+            Route::Jump(jump) => jump.open(host, port).await,
+            Route::Vpn(vpn) => vpn.open(host, port).await,
+        };
+        stream.map(Counted::new)
+    }
 }
+
+/// How often the tunnel's latency is measured, and how long an answer is waited for.
+const LATENCY_INTERVAL: Duration = Duration::from_secs(5);
+const LATENCY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// One SSH session to the jump host.
 struct JumpTunnel {
@@ -199,6 +220,15 @@ impl JumpTunnel {
             *guard = Some(self.connect_ssh().await?);
         }
         Ok(())
+    }
+
+    /// The round trip of an SSH keepalive to the jump host; `None` while the session is down.
+    async fn latency(&self) -> Option<Duration> {
+        let guard = self.handle.lock().await;
+        let handle = guard.as_ref().filter(|h| !h.is_closed())?;
+        let sent = tokio::time::Instant::now();
+        tokio::time::timeout(LATENCY_TIMEOUT, handle.send_ping()).await.ok()?.ok()?;
+        Some(sent.elapsed())
     }
 
     /// Opens a `direct-tcpip` channel from the jump host to `host:port`.

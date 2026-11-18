@@ -6,9 +6,9 @@
 set -eu
 
 VERSION=1.74.0
-ICONS="check circle-alert circle-check copy ellipsis-vertical folder-open info key-round laptop monitor
-network pencil plug plus ratio route search server shield-check square-terminal trash-2
-user-round chevron-right power list x"
+ICONS="check circle-alert circle-check copy ellipsis-vertical info key-round laptop monitor
+plug plus route search server shield-check square-terminal trash-2
+chevron-right power x refresh-cw activity sliders-horizontal"
 BASE="https://unpkg.com/lucide-static@$VERSION"
 
 cd "$(dirname "$0")/../assets/icons/lucide"

@@ -21,28 +21,6 @@ pub const SECRET_STORE_SHORT: &str = if cfg!(target_os = "macos") {
 /// Name of the local machine in the route diagram.
 pub const THIS_DEVICE: &str = if cfg!(target_os = "macos") { "이 Mac" } else { "이 PC" };
 
-/// The operating system, as the route diagram labels the local machine.
-pub const OS_NAME: &str = if cfg!(target_os = "macos") {
-    "macOS"
-} else if cfg!(windows) {
-    "Windows"
-} else {
-    "Linux"
-};
-
-/// This computer's network name without the `.local` suffix, looked up once. Tests (and so the
-/// screenshots that go into the README) use a fixed name instead of the developer's machine.
-pub fn host_name() -> &'static str {
-    if cfg!(test) {
-        return "my-laptop";
-    }
-    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    NAME.get_or_init(|| {
-        let name = whoami::hostname().unwrap_or_default();
-        name.strip_suffix(".local").unwrap_or(&name).to_owned()
-    })
-}
-
 /// Shortcut label for the command modifier (egui's `Modifiers::COMMAND`): "⌘N" or "Ctrl+N".
 pub fn shortcut(key: &str) -> String {
     if cfg!(target_os = "macos") { format!("⌘{key}") } else { format!("Ctrl+{key}") }

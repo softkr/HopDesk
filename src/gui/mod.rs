@@ -653,12 +653,23 @@ impl Launcher {
         motion::fade_in(ui, Id::unique("main_view"), key, |ui| self.main_view(ui));
     }
 
+    /// The folder shared with RDP sessions: the chosen one, else the default location.
+    fn shared_folder(&self) -> std::path::PathBuf {
+        self.store
+            .shared_folder()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| crate::shared_folder::default_path().unwrap_or_default())
+    }
+
     fn main_view(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        let shared_folder = self.shared_folder();
         match &mut self.view {
-            View::Edit { form, .. } => match form.ui(ui, &self.store) {
+            View::Edit { form, .. } => match form.ui(ui, &self.store, &shared_folder) {
                 form::Action::Save => self.save(&ctx),
                 form::Action::Cancel => self.navigate(Nav::CloseEditor),
+                form::Action::OpenSharedFolder => reveal_in_file_manager(&shared_folder),
+                form::Action::PickSharedFolder => self.pick_shared_folder(&ctx),
                 form::Action::None => {}
             },
             View::Detail => {
@@ -668,21 +679,20 @@ impl Launcher {
                 };
                 let state = self.sessions.state(profile.id);
                 let log = self.sessions.log(profile.id);
-                let shared_folder = self
-                    .store
-                    .shared_folder()
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| crate::shared_folder::default_path().unwrap_or_default());
-                let since = self.sessions.connected_since(profile.id);
-                match detail::ui(ui, &profile, state.as_ref(), since, &log, &shared_folder) {
+                let traffic = self.sessions.traffic(profile.id);
+                let live = detail::Live {
+                    connected_since: self.sessions.connected_since(profile.id),
+                    latency: self.sessions.latency(profile.id),
+                    traffic: traffic.as_ref(),
+                };
+                match detail::ui(ui, &profile, state.as_ref(), &live, &log) {
                     detail::Action::Connect => self.connect(&ctx, profile.id),
                     detail::Action::Cancel => self.sessions.cancel(profile.id),
+                    detail::Action::Reconnect => self.sessions.restart(profile.id),
                     detail::Action::Dismiss => self.sessions.dismiss(profile.id),
                     detail::Action::Edit => self.navigate(Nav::Edit(profile.id)),
                     detail::Action::Delete => self.dialog = Some(Dialog::Delete(profile.id)),
                     detail::Action::ForgetKeys => self.dialog = Some(Dialog::ForgetKeys(profile.id)),
-                    detail::Action::OpenSharedFolder => reveal_in_file_manager(&shared_folder),
-                    detail::Action::PickSharedFolder => self.pick_shared_folder(&ctx),
                     detail::Action::None => {}
                 }
             }

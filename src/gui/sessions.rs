@@ -46,15 +46,51 @@ pub struct FailureInfo {
     pub at_remote: bool,
 }
 
+/// How many traffic samples a session keeps: one a second, a minute of history.
+pub const TRAFFIC_SAMPLES: usize = 60;
+
+/// A session's recent traffic, from the totals its process reports (see [`crate::stats`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Traffic {
+    /// `(download, upload)` in bits per second, oldest first.
+    pub samples: std::collections::VecDeque<(f64, f64)>,
+    /// The last totals and when they arrived.
+    last: Option<(u64, u64, std::time::Instant)>,
+}
+
+impl Traffic {
+    /// Takes the byte totals reported at `now`; the first report only sets the baseline.
+    fn record(&mut self, received: u64, sent: u64, now: std::time::Instant) {
+        if let Some((last_received, last_sent, at)) = self.last {
+            let secs = now.duration_since(at).as_secs_f64();
+            if secs > 0.0 {
+                #[expect(clippy::cast_precision_loss, reason = "a second's bytes are far below 2^52")]
+                let rate = |total: u64, last: u64| total.saturating_sub(last) as f64 * 8.0 / secs;
+                self.samples.push_back((rate(received, last_received), rate(sent, last_sent)));
+                if self.samples.len() > TRAFFIC_SAMPLES {
+                    self.samples.pop_front();
+                }
+            }
+        }
+        self.last = Some((received, sent, now));
+    }
+}
+
 pub struct Session {
     pub state: State,
     pub log: Vec<String>,
     /// When the session first connected; kept through reconnects, for its uptime.
     connected_since: Option<std::time::Instant>,
+    /// Set once the session's process reports traffic.
+    traffic: Option<Traffic>,
+    /// The last reported round trip to the tunnel's far end.
+    latency: Option<std::time::Duration>,
     /// Decides how failures are explained.
     protocol: Protocol,
     child: Option<Arc<Mutex<Child>>>,
     cancelled: bool,
+    /// Start the session again once its process has ended (see [`Sessions::restart`]).
+    restart: bool,
 }
 
 /// Something the UI should announce once (toast).
@@ -89,6 +125,14 @@ impl Sessions {
         self.lock().sessions.get(&id).and_then(|s| s.connected_since)
     }
 
+    pub fn traffic(&self, id: Uuid) -> Option<Traffic> {
+        self.lock().sessions.get(&id).and_then(|s| s.traffic.clone())
+    }
+
+    pub fn latency(&self, id: Uuid) -> Option<std::time::Duration> {
+        self.lock().sessions.get(&id).and_then(|s| s.latency)
+    }
+
     pub fn log(&self, id: Uuid) -> Vec<String> {
         self.lock().sessions.get(&id).map(|s| s.log.clone()).unwrap_or_default()
     }
@@ -116,12 +160,34 @@ impl Sessions {
         }
     }
 
+    /// Ends a running session and starts it again as soon as its process has gone.
+    pub fn restart(&self, id: Uuid) {
+        if let Some(session) = self.lock().sessions.get_mut(&id) {
+            session.restart = true;
+        }
+        self.cancel(id);
+    }
+
     #[cfg(test)]
     pub fn set_for_test(&self, id: Uuid, state: State, log: Vec<String>) {
         let connected_since = (state == State::Connected).then(std::time::Instant::now);
         self.lock()
             .sessions
-            .insert(id, Session { state, log, connected_since, protocol: Protocol::Rdp, child: None, cancelled: false });
+            .insert(id, Session { state, log, connected_since, traffic: None, latency: None, protocol: Protocol::Rdp, child: None, cancelled: false, restart: false });
+    }
+
+    #[cfg(test)]
+    pub fn set_traffic_for_test(&self, id: Uuid, samples: &[(f64, f64)]) {
+        if let Some(session) = self.lock().sessions.get_mut(&id) {
+            session.traffic = Some(Traffic { samples: samples.iter().copied().collect(), last: None });
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_latency_for_test(&self, id: Uuid, latency: std::time::Duration) {
+        if let Some(session) = self.lock().sessions.get_mut(&id) {
+            session.latency = Some(latency);
+        }
     }
 
     #[cfg(test)]
@@ -159,9 +225,12 @@ impl Sessions {
                 state: State::Starting,
                 log: Vec::new(),
                 connected_since: None,
+                traffic: None,
+                latency: None,
                 protocol,
                 child: Some(Arc::clone(&child)),
                 cancelled: false,
+                restart: false,
             },
         );
 
@@ -172,6 +241,19 @@ impl Sessions {
             let mut session_log = session_log;
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
+                // Traffic and latency reports arrive every few seconds: kept out of the logs.
+                if let Some((received, sent)) = status::parse_stats(&line) {
+                    this.on_stats(id, received, sent);
+                    ctx.request_repaint();
+                    continue;
+                }
+                if let Some(latency) = status::parse_latency(&line) {
+                    if let Some(session) = this.lock().sessions.get_mut(&id) {
+                        session.latency = Some(latency);
+                    }
+                    ctx.request_repaint();
+                    continue;
+                }
                 if let Some(log) = session_log.as_mut() {
                     let _ = writeln!(log, "{line}");
                 }
@@ -179,10 +261,19 @@ impl Sessions {
                 ctx.request_repaint();
             }
             let exit = child.lock().map(|mut c| c.wait());
-            this.on_exit(id, &name, matches!(exit, Ok(Ok(s)) if s.success()));
+            let restart = this.on_exit(id, &name, matches!(exit, Ok(Ok(s)) if s.success()));
+            if restart && let Err(e) = this.start(id, &name, protocol, &ctx) {
+                tracing::error!(error = %format!("{e:#}"), "Restarting the session failed");
+            }
             ctx.request_repaint();
         });
         Ok(())
+    }
+
+    fn on_stats(&self, id: Uuid, received: u64, sent: u64) {
+        if let Some(session) = self.lock().sessions.get_mut(&id) {
+            session.traffic.get_or_insert_default().record(received, sent, std::time::Instant::now());
+        }
     }
 
     fn on_line(&self, id: Uuid, line: String) {
@@ -218,21 +309,24 @@ impl Sessions {
         }
     }
 
-    fn on_exit(&self, id: Uuid, name: &str, success: bool) {
+    /// Records the end of a session process; `true` when the session is to be started again.
+    fn on_exit(&self, id: Uuid, name: &str, success: bool) -> bool {
         let mut inner = self.lock();
-        let Some(session) = inner.sessions.get_mut(&id) else { return };
+        let Some(session) = inner.sessions.get_mut(&id) else { return false };
         session.child = None;
+        let restart = session.restart;
         let failed = matches!(session.state, State::Failed(_));
         if session.cancelled || (!failed && success) {
             let was_connected = matches!(session.state, State::Connected | State::Reconnecting);
             inner.sessions.remove(&id);
-            if was_connected {
+            if was_connected && !restart {
                 inner.notices.push(Notice::Ended { name: name.to_owned() });
             }
         } else if !failed {
             let detail = session.log.last().cloned().unwrap_or_default();
             session.state = State::Failed(explain(&detail, &session.log, &session.state, session.protocol));
         }
+        restart
     }
 }
 
@@ -294,13 +388,13 @@ fn explain(detail: &str, log: &[String], state: &State, protocol: Protocol) -> F
     } else if has("no stored VPN private key") {
         (
             "저장된 VPN 개인키가 없습니다".into(),
-            "연결을 편집해서 개인키를 다시 입력하세요.".into(),
+            "연결 설정에서 개인키를 다시 입력하세요.".into(),
             false,
         )
     } else if vpn_settings_wrong {
         (
             "VPN 설정이 올바르지 않습니다".into(),
-            "연결을 편집해서 키와 대상 주소(VPN 안에서는 IP 주소)를 확인하세요.".into(),
+            "연결 설정에서 키와 대상 주소(VPN 안에서는 IP 주소)를 확인하세요.".into(),
             false,
         )
     } else if has("VPN handshake timed out") {
@@ -318,7 +412,7 @@ fn explain(detail: &str, log: &[String], state: &State, protocol: Protocol) -> F
     } else if has("no stored") {
         (
             "저장된 비밀번호가 없습니다".into(),
-            "연결을 편집해서 비밀번호를 다시 입력하세요.".into(),
+            "연결 설정에서 비밀번호를 다시 입력하세요.".into(),
             false,
         )
     } else if has("load private key") {
@@ -382,6 +476,22 @@ fn explain(detail: &str, log: &[String], state: &State, protocol: Protocol) -> F
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traffic_rates_come_from_the_totals_between_reports() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let mut traffic = Traffic::default();
+        traffic.record(1000, 100, start);
+        assert!(traffic.samples.is_empty(), "the first report is the baseline");
+        traffic.record(1000 + 125_000, 100 + 1250, start + Duration::from_secs(1));
+        traffic.record(1000 + 125_000, 100 + 1250, start + Duration::from_secs(3));
+        assert_eq!(traffic.samples, [(1_000_000.0, 10_000.0), (0.0, 0.0)]);
+        for i in 0..2 * TRAFFIC_SAMPLES as u64 {
+            traffic.record(200_000, 2000, start + Duration::from_secs(4 + i));
+        }
+        assert_eq!(traffic.samples.len(), TRAFFIC_SAMPLES);
+    }
 
     #[test]
     fn rdp_wording_is_unchanged() {

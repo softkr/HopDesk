@@ -3,30 +3,36 @@
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Id, Pos2, RichText, Sense, Stroke, Ui, Vec2, emath::easing};
 
 use super::motion;
-use super::sessions::{FailureInfo, State};
-use super::theme::{Bold as _, HEADING_SIZE, Palette, TITLE_SIZE, bold_family, palette};
+use super::sessions::{FailureInfo, State, TRAFFIC_SAMPLES, Traffic};
+use super::theme::{Bold as _, Palette, TITLE_SIZE, bold_family, palette};
 use super::widgets::{self, Icon, card};
-use crate::profile::{DisplayMode, Profile, Protocol};
+use crate::profile::{Profile, Protocol};
 
 pub enum Action {
     None,
     Connect,
     Cancel,
+    Reconnect,
     Dismiss,
     Edit,
     Delete,
     ForgetKeys,
-    OpenSharedFolder,
-    PickSharedFolder,
+}
+
+/// What a running session reports about itself.
+pub struct Live<'a> {
+    pub connected_since: Option<std::time::Instant>,
+    /// Round trip to the tunnel's far end.
+    pub latency: Option<std::time::Duration>,
+    pub traffic: Option<&'a Traffic>,
 }
 
 pub fn ui(
     ui: &mut Ui,
     profile: &Profile,
     state: Option<&State>,
-    connected_since: Option<std::time::Instant>,
+    live: &Live<'_>,
     log: &[String],
-    shared_folder: &std::path::Path,
 ) -> Action {
     let pal = palette(ui);
     let mut action = Action::None;
@@ -38,12 +44,12 @@ pub fn ui(
 
         card(ui, |ui| {
             widgets::card_header(ui, Icon::Route, "세션 경로", |ui| {
-                if let (Some(State::Connected), Some(since)) = (state, connected_since) {
+                if let (Some(State::Connected), Some(since)) = (state, live.connected_since) {
                     uptime_label(ui, &pal, since);
                 }
             });
             ui.add_space(14.0);
-            route(ui, &pal, profile, state);
+            route(ui, &pal, profile, state, live.latency);
             ui.add_space(6.0);
             hairline(ui, &pal);
             ui.add_space(14.0);
@@ -69,13 +75,25 @@ pub fn ui(
         });
         ui.add_space(12.0);
 
+        // Always shown, so the layout does not jump; without numbers it says why.
+        let empty = Traffic::default();
+        let traffic = live.traffic.unwrap_or(&empty);
+        let up = matches!(state, Some(State::Connected | State::Reconnecting));
+        let hint = if !up {
+            "연결하면 속도가 표시됩니다"
+        } else if profile.is_tunneled() || profile.protocol == Protocol::Vnc {
+            "측정하는 중..."
+        } else {
+            "직접 접속은 속도를 측정하지 않습니다"
+        };
         card(ui, |ui| {
-            widgets::card_header(ui, Icon::List, "연결 정보", |_| {});
-            facts(ui, &pal, profile, shared_folder, &mut action);
+            widgets::card_header(ui, Icon::Activity, "실시간 트래픽", |ui| traffic_legend(ui, &pal, traffic));
+            ui.add_space(6.0);
+            traffic_chart(ui, &pal, traffic, hint);
         });
+        ui.add_space(12.0);
 
         if profile.protocol == Protocol::Vnc && !profile.is_tunneled() {
-            ui.add_space(12.0);
             widgets::banner(ui, pal.danger_soft, pal.danger.gamma_multiply(0.4), |ui| {
                 ui.label(RichText::new("암호화되지 않은 연결").bold().color(pal.danger));
                 ui.label(
@@ -83,10 +101,10 @@ pub fn ui(
                         .color(pal.text),
                 );
             });
+            ui.add_space(12.0);
         }
 
         if !log.is_empty() {
-            ui.add_space(12.0);
             card(ui, |ui| {
                 egui::CollapsingHeader::new(RichText::new("연결 로그").bold())
                     .default_open(matches!(state, Some(State::Failed(_))))
@@ -111,74 +129,12 @@ pub fn ui(
     action
 }
 
-/// The connection's settings in three groups: how it is reached, the target, and (RDP) the session.
-fn facts(ui: &mut Ui, pal: &Palette, profile: &Profile, shared_folder: &std::path::Path, action: &mut Action) {
-    let key_or_password = |key: &Option<std::path::PathBuf>| match key {
-        Some(path) => format!("개인 키 · {}", tilde(path)),
-        None => "비밀번호".to_owned(),
-    };
-    widgets::fact_group(ui, "접속 경로", |f| {
-        if let Some(vpn) = &profile.vpn {
-            f.row(Icon::Shield, "VPN (WireGuard)", &vpn.endpoint);
-            let addresses = vpn.addresses.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-            f.row(Icon::Network, "VPN 주소", &addresses);
-        } else if profile.use_jump {
-            let j = &profile.jump;
-            f.row(Icon::Server, "점프 호스트", &format!("{}@{}:{}", j.user, j.host, j.port));
-            f.row(Icon::Key, "SSH 인증", &key_or_password(&j.key_path));
-        } else {
-            f.row(Icon::Route, "방식", "직접 접속");
-        }
-    });
-
-    let t = &profile.target;
-    let target_icon = if profile.protocol == Protocol::Ssh { Icon::Terminal } else { Icon::Monitor };
-    widgets::fact_group(ui, super::target_noun(profile.protocol), |f| {
-        f.row(target_icon, "주소", &format!("{}:{}", t.host, t.port));
-        match profile.protocol {
-            Protocol::Vnc => {
-                let login = match t.user.as_str() {
-                    "" => "VNC 비밀번호".to_owned(),
-                    user => format!("macOS 계정 · {user}"),
-                };
-                f.row(Icon::User, "로그인", &login);
-            }
-            Protocol::Ssh => {
-                f.row(Icon::User, "계정", &account(profile));
-                f.row(Icon::Key, "인증", &key_or_password(&t.key_path));
-            }
-            Protocol::Rdp => f.row(Icon::User, "Windows 계정", &account(profile)),
-        }
-    });
-
-    if profile.protocol != Protocol::Rdp {
-        return;
-    }
-    widgets::fact_group(ui, "세션", |f| {
-        let resolution = match profile.display {
-            DisplayMode::Fixed => format!("{} × {}", profile.width, profile.height),
-            mode => mode.label().to_owned(),
-        };
-        f.row(Icon::Ratio, "해상도", &resolution);
-        f.row_with(Icon::Folder, "공유 폴더", &tilde(shared_folder), |ui| {
-            // Quiet text buttons: the row is information first. Right to left: "열기" ends up first.
-            let quiet = |text: &str| egui::Button::new(RichText::new(text).color(pal.accent)).frame_when_inactive(false).small();
-            if ui.add(quiet("변경…")).clicked() {
-                *action = Action::PickSharedFolder;
-            }
-            if ui.add(quiet("열기")).clicked() {
-                *action = Action::OpenSharedFolder;
-            }
-        });
-    });
-}
-
-/// Identity card: tile with the session's status dot, name with its state, protocol and route tags,
-/// account and address; actions on the right.
+/// Identity card: tile with the session's status dot, the name with its state on one line, and the
+/// protocol and route tags with the account and address on the next; actions on the right.
 fn header(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, action: &mut Action) {
-    const TILE: f32 = 64.0;
-    /// Fits the three text rows; the tile and the actions are centered on it.
-    const HEIGHT: f32 = 84.0;
+    const TILE: f32 = 52.0;
+    /// Fits the two text rows; the tile and the actions are centered on it.
+    const HEIGHT: f32 = 56.0;
     const PILL_ROOM: f32 = 170.0;
     let badge = state.map(|s| super::state_badge(pal, s));
     card(ui, |ui| {
@@ -203,22 +159,22 @@ fn header(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, 
                     ui.close();
                 }
             });
-            let edit = widgets::outline_button(pal, Icon::Pencil, "편집");
-            if ui.add(edit).on_hover_text(super::platform::shortcut("E")).clicked() {
+            let settings = widgets::quiet_button(ui, Icon::Settings, "설정", 32.0);
+            if settings.on_hover_text(super::platform::shortcut("E")).clicked() {
                 *action = Action::Edit;
             }
 
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 widgets::avatar_tile(ui, TILE, &profile.name, badge.map(|(color, _)| color));
-                ui.add_space(16.0);
+                ui.add_space(14.0);
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 6.0;
+                    ui.spacing_mut().item_spacing.y = 4.0;
                     ui.horizontal(|ui| {
                         ui.scope(|ui| {
                             // Leave room for the state pill; a long name is cut short instead.
                             let room = if badge.is_some() { PILL_ROOM } else { 0.0 };
                             ui.set_max_width((ui.available_width() - room).max(80.0));
-                            ui.add(egui::Label::new(RichText::new(&profile.name).size(HEADING_SIZE).bold()).truncate());
+                            ui.add(egui::Label::new(RichText::new(&profile.name).size(NAME_SIZE).bold()).truncate());
                         });
                         if let Some((color, label)) = badge {
                             widgets::status_pill(ui, color, label);
@@ -229,13 +185,17 @@ fn header(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, 
                         widgets::tag(ui, super::protocol_name(profile.protocol), pal.text, pal.subtle);
                         let route = super::route_name(profile).unwrap_or("직접 접속");
                         widgets::tag(ui, route, pal.accent, pal.accent_soft);
+                        ui.add_space(6.0);
+                        meta_line(ui, pal, profile);
                     });
-                    meta_line(ui, pal, profile);
                 });
             });
         });
     });
 }
+
+/// The connection name in the header: between a card title and the page heading.
+const NAME_SIZE: f32 = 19.0;
 
 /// `account │ host:port` in a monospace face, like the address bar of a terminal.
 fn meta_line(ui: &mut Ui, pal: &Palette, profile: &Profile) {
@@ -277,23 +237,104 @@ fn format_uptime(elapsed: std::time::Duration) -> String {
     format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
 }
 
+/// The highest rate in the traffic history, the scale of its chart.
+fn traffic_peak(traffic: &Traffic) -> f64 {
+    traffic.samples.iter().map(|(down, up)| down.max(*up)).fold(0.0, f64::max)
+}
+
+/// The latest download and upload rates and the chart's peak, for the right end of the card's
+/// header row (laid out right to left).
+fn traffic_legend(ui: &mut Ui, pal: &Palette, traffic: &Traffic) {
+    let latest = traffic.samples.back().copied();
+    let peak = traffic_peak(traffic);
+    ui.spacing_mut().item_spacing.x = 6.0;
+    if peak > 0.0 {
+        ui.label(RichText::new(format!("최대 {}", format_rate(peak))).font(FontId::monospace(11.5)).color(pal.text_weak))
+            .on_hover_text("최근 1분 중 최고 속도");
+        ui.add_space(12.0);
+    }
+    let rates = [("업로드", latest.map(|(_, up)| up), pal.text_weak), ("다운로드", latest.map(|(down, _)| down), pal.accent)];
+    for (label, rate, color) in rates {
+        let value = rate.map_or_else(|| "—".to_owned(), format_rate);
+        ui.label(RichText::new(value).font(FontId::monospace(13.0)).color(pal.text));
+        ui.label(RichText::new(label).small().color(pal.text_weak));
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+        ui.painter().circle_filled(rect.center(), 3.5, color);
+        ui.add_space(10.0);
+    }
+}
+
+/// Download and upload over the last minute on one scale. Download is the filled series in the
+/// accent color, upload a plain line. Without any traffic yet, `hint` says why.
+fn traffic_chart(ui: &mut Ui, pal: &Palette, traffic: &Traffic, hint: &str) {
+    const HEIGHT: f32 = 44.0;
+    let peak = traffic_peak(traffic);
+    let up_color = pal.text_weak;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), HEIGHT), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, pal.border));
+    if traffic.samples.is_empty() {
+        painter.text(rect.center(), Align2::CENTER_CENTER, hint, FontId::proportional(13.0), pal.text_weak);
+        return;
+    }
+    if peak <= 0.0 {
+        return;
+    }
+    // The newest sample sits at the right edge; a short history leaves the left empty.
+    let step = rect.width() / (TRAFFIC_SAMPLES - 1) as f32;
+    let first = TRAFFIC_SAMPLES - traffic.samples.len();
+    let top = rect.top() + 2.0;
+    let point = |i: usize, rate: f64| {
+        #[expect(clippy::cast_possible_truncation, reason = "a ratio in 0..=1")]
+        let level = (rate / peak) as f32;
+        Pos2::new(rect.left() + (first + i) as f32 * step, rect.bottom() - 1.0 - level * (rect.bottom() - 1.0 - top))
+    };
+    let down_line: Vec<Pos2> = traffic.samples.iter().enumerate().map(|(i, s)| point(i, s.0)).collect();
+    let up_line: Vec<Pos2> = traffic.samples.iter().enumerate().map(|(i, s)| point(i, s.1)).collect();
+    // The area under the download line, one quad per step (a single polygon would not be convex).
+    for pair in down_line.windows(2) {
+        let quad = vec![pair[0], pair[1], Pos2::new(pair[1].x, rect.bottom()), Pos2::new(pair[0].x, rect.bottom())];
+        painter.add(egui::Shape::convex_polygon(quad, pal.accent.gamma_multiply(0.14), Stroke::NONE));
+    }
+    painter.add(egui::Shape::line(up_line, Stroke::new(1.5, up_color)));
+    painter.add(egui::Shape::line(down_line, Stroke::new(2.0, pal.accent)));
+}
+
+/// A round trip in milliseconds: one decimal below 10 ms, whole numbers above.
+fn format_latency(latency: std::time::Duration) -> String {
+    let ms = latency.as_secs_f64() * 1000.0;
+    if ms < 10.0 { format!("{ms:.1} ms") } else { format!("{ms:.0} ms") }
+}
+
+/// A bit rate with a unit that keeps it to a few digits: `0 bps`, `320 kbps`, `24.5 Mbps`.
+fn format_rate(bits_per_sec: f64) -> String {
+    const KILO: f64 = 1000.0;
+    if bits_per_sec < KILO {
+        format!("{bits_per_sec:.0} bps")
+    } else if bits_per_sec < KILO * KILO {
+        format!("{:.0} kbps", bits_per_sec / KILO)
+    } else if bits_per_sec < KILO * KILO * KILO {
+        format!("{:.1} Mbps", bits_per_sec / (KILO * KILO))
+    } else {
+        format!("{:.2} Gbps", bits_per_sec / (KILO * KILO * KILO))
+    }
+}
+
 /// A 1 px divider across the card.
 fn hairline(ui: &mut Ui, pal: &Palette) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
     ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, pal.border));
 }
 
-/// One stop on the route: its icon, name, address and role.
+/// One stop on the route: its icon and name.
 struct Stop {
     icon: Icon,
     title: String,
-    address: String,
-    role: String,
 }
 
 /// The route diagram, doubling as the progress indicator: a tile per stop (this device, the jump
 /// host or VPN, the target) joined by links labeled with what runs over them.
-fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
+fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>, latency: Option<std::time::Duration>) {
     use Node::*;
     let (mut nodes, mut links) = match state {
         None => ([Idle, Idle, Idle], [Idle, Idle]),
@@ -310,23 +351,22 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     let local = Stop {
         icon: Icon::Laptop,
         title: super::platform::THIS_DEVICE.to_owned(),
-        address: super::platform::host_name().to_owned(),
-        role: super::platform::OS_NAME.to_owned(),
     };
     let target = Stop {
         icon: if profile.protocol == Protocol::Ssh { Icon::Terminal } else { Icon::Monitor },
         title: super::target_noun(profile.protocol).to_owned(),
-        address: format!("{}:{}", profile.target.host, profile.target.port),
-        role: protocol.to_owned(),
     };
-    let (stops, link_labels, positions) = if let Some(vpn) = &profile.vpn {
-        let middle = Stop { icon: Icon::Shield, title: "VPN".to_owned(), address: vpn.endpoint.clone(), role: "WireGuard".to_owned() };
-        (vec![local, middle, target], vec!["WireGuard".to_owned(), target_link], vec![1.0 / 6.0, 0.5, 5.0 / 6.0])
+    // The tunnel's link shows its measured round trip while the session is up.
+    let tunnel_link = |name: &str| match (state, latency) {
+        (Some(State::Connected), Some(latency)) => format!("{name} · {}", format_latency(latency)),
+        _ => name.to_owned(),
+    };
+    let (stops, link_labels, positions) = if profile.vpn.is_some() {
+        let middle = Stop { icon: Icon::Shield, title: "VPN".to_owned() };
+        (vec![local, middle, target], vec![tunnel_link("WireGuard"), target_link], vec![1.0 / 6.0, 0.5, 5.0 / 6.0])
     } else if profile.use_jump {
-        let j = &profile.jump;
-        let auth = if j.key_path.is_some() { "개인 키" } else { "비밀번호" };
-        let middle = Stop { icon: Icon::Server, title: "점프 호스트".to_owned(), address: format!("{}:{}", j.host, j.port), role: auth.to_owned() };
-        (vec![local, middle, target], vec!["SSH".to_owned(), target_link], vec![1.0 / 6.0, 0.5, 5.0 / 6.0])
+        let middle = Stop { icon: Icon::Server, title: "점프 호스트".to_owned() };
+        (vec![local, middle, target], vec![tunnel_link("SSH"), target_link], vec![1.0 / 6.0, 0.5, 5.0 / 6.0])
     } else {
         // Direct connection: this device -> target. A failure before the session is the target's.
         let remote = match nodes[2] {
@@ -353,7 +393,6 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
     let painter = ui.painter_at(rect.expand(8.0));
     let cy = rect.top() + 8.0 + TILE / 2.0;
     let xs: Vec<f32> = positions.iter().map(|f| rect.left() + rect.width() * f).collect();
-    let column = rect.width() / node_count as f32 - 16.0;
     let color = |n: Node| match n {
         Idle => pal.border,
         Done => pal.success,
@@ -456,24 +495,8 @@ fn route(ui: &mut Ui, pal: &Palette, profile: &Profile, state: Option<&State>) {
             }
         }
 
-        let mut y = tile.bottom() + 16.0;
+        let y = tile.bottom() + 16.0;
         painter.text(Pos2::new(center.x, y), Align2::CENTER_CENTER, &stop.title, FontId::new(13.5, bold_family()), pal.text);
-        y += 19.0;
-        let mut job = egui::text::LayoutJob::single_section(stop.address.clone(), egui::TextFormat::simple(mono.clone(), pal.text_weak));
-        job.wrap = egui::text::TextWrapping::truncate_at_width(column);
-        let address = painter.layout_job(job);
-        painter.galley(Pos2::new(center.x - address.size().x / 2.0, y - address.size().y / 2.0), address, pal.text_weak);
-        y += 22.0;
-        // The destination's role chip turns into the result once the session is up.
-        let (role, text_color, chip_fill, chip_stroke) = if arrived {
-            ("연결됨", Color32::WHITE, pal.success, pal.success)
-        } else {
-            (stop.role.as_str(), pal.text_weak, pal.bg, pal.border)
-        };
-        let font = FontId::proportional(11.5);
-        let size = widgets::tag_size(ui, role, &font);
-        let chip = egui::Rect::from_center_size(Pos2::new(center.x, y), size);
-        widgets::paint_tag(ui, chip, role, font, text_color, chip_fill, chip_stroke);
     }
 
     // A connection that succeeds on screen gets a light running the route once and a ring blooming
@@ -620,7 +643,7 @@ fn paint_sweep(painter: &egui::Painter, path: &[Pos2], head: f32, bloom: f32, la
 
 /// Route diagram geometry: the stop tiles, the gap between a tile and its links, the icon in a
 /// tile and the result badge on its corner.
-const DIAGRAM_HEIGHT: f32 = 152.0;
+const DIAGRAM_HEIGHT: f32 = 102.0;
 const TILE: f32 = 56.0;
 const TILE_RADIUS: u8 = 16;
 const LINK_GAP: f32 = 12.0;
@@ -671,6 +694,9 @@ fn status_area(ui: &mut Ui, pal: &Palette, protocol: Protocol, connecting: &str,
                     if ui.add(widgets::danger_outline_button(pal, Icon::Power, "연결 끊기")).clicked() {
                         *action = Action::Cancel;
                     }
+                    if ui.add(widgets::outline_button(pal, Icon::Refresh, "재연결")).clicked() {
+                        *action = Action::Reconnect;
+                    }
                 },
             );
         }
@@ -712,7 +738,7 @@ fn failure(ui: &mut Ui, pal: &Palette, info: &FailureInfo, action: &mut Action) 
                     *action = Action::ForgetKeys;
                 }
             } else if info.fix_in_settings {
-                if widgets::primary_button(ui, "설정 편집").clicked() {
+                if widgets::primary_button(ui, "설정 열기").clicked() {
                     *action = Action::Edit;
                 }
                 if ui.button("다시 시도").clicked() {
@@ -722,7 +748,7 @@ fn failure(ui: &mut Ui, pal: &Palette, info: &FailureInfo, action: &mut Action) 
                 if widgets::primary_button(ui, "다시 시도").clicked() {
                     *action = Action::Connect;
                 }
-                if ui.button("설정 편집").clicked() {
+                if ui.button("설정 열기").clicked() {
                     *action = Action::Edit;
                 }
             }
@@ -745,12 +771,6 @@ fn account(profile: &Profile) -> String {
         Some(domain) => format!("{domain}\\{}", profile.target.user),
         None => profile.target.user.clone(),
     }
-}
-
-fn tilde(path: &std::path::Path) -> String {
-    directories::BaseDirs::new()
-        .and_then(|d| path.strip_prefix(d.home_dir()).ok().map(|rest| format!("~/{}", rest.display())))
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 #[cfg(test)]
@@ -784,6 +804,21 @@ mod tests {
         assert_eq!(super::format_uptime(Duration::from_secs(0)), "00:00:00");
         assert_eq!(super::format_uptime(Duration::from_millis(3_723_900)), "01:02:03");
         assert_eq!(super::format_uptime(Duration::from_secs(100 * 3600 + 59)), "100:00:59");
+    }
+
+    #[test]
+    fn latency_keeps_a_decimal_only_when_small() {
+        use std::time::Duration;
+        assert_eq!(super::format_latency(Duration::from_micros(800)), "0.8 ms");
+        assert_eq!(super::format_latency(Duration::from_micros(12_400)), "12 ms");
+    }
+
+    #[test]
+    fn rates_pick_a_readable_unit() {
+        assert_eq!(super::format_rate(0.0), "0 bps");
+        assert_eq!(super::format_rate(320_400.0), "320 kbps");
+        assert_eq!(super::format_rate(24_540_000.0), "24.5 Mbps");
+        assert_eq!(super::format_rate(1_250_000_000.0), "1.25 Gbps");
     }
 
     #[test]
