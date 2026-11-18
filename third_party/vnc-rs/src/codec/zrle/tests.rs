@@ -87,3 +87,31 @@ async fn valid_modes_and_persistent_compression_preserve_pixels() {
         assert_eq!(pixels, expected);
     }
 }
+
+// [PATCH HopDesk]
+#[tokio::test]
+async fn trailing_or_oversized_data_is_rejected() {
+    // A 1x1 solid tile followed by a byte no tile accounts for.
+    let mut compressor = flate2::Compress::new(flate2::Compression::fast(), true);
+    let packet = compress(&mut compressor, &[1, 1, 2, 3, 9]);
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+    };
+    let mut input = packet.as_slice();
+    let result = Decoder::new()
+        .decode(&PixelFormat::rgba(), &rect, &mut input, &|_| async { Ok(()) })
+        .await;
+    assert!(result.is_err());
+
+    // Far more data than a 1x1 rectangle can need: refused instead of inflated.
+    let mut compressor = flate2::Compress::new(flate2::Compression::fast(), true);
+    let packet = compress(&mut compressor, &vec![0; 1 << 20]);
+    let mut input = packet.as_slice();
+    let result = Decoder::new()
+        .decode(&PixelFormat::rgba(), &rect, &mut input, &|_| async { Ok(()) })
+        .await;
+    assert!(result.is_err());
+}

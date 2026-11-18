@@ -70,6 +70,15 @@ Raises `MAX_PIXELS` from 4K (3840x2160) to 8K (7680x4320). A Mac with a 5K or 6K
 a screen above the 4K limit, and the connection failed with "Image data cannot be decoded
 correctly" right after authentication. The limit per side (8192) is unchanged.
 
+### Local patch: `vnc-rs-zrle-bulk-inflate.patch`
+
+The ZRLE decoder inflates a rectangle in one go and parses it from memory instead of asking
+zlib for every pixel. A full 6K screen decodes 2-4 times faster (about 205 ms -> 55 ms for
+palette tiles, 445 ms -> 225 ms for incompressible true-color tiles in a local benchmark).
+The inflated size is limited to what the rectangle's tiles can need.
+
+Search for `[PATCH HopDesk]` to find the changed code.
+
 ### Updating vnc-rs
 
 ```sh
@@ -77,4 +86,5 @@ rm -rf third_party/vnc-rs
 cargo download vnc-rs==<version> -x -o third_party/vnc-rs   # or unpack the .crate file
 rm -f third_party/vnc-rs/Cargo.lock
 (cd third_party/vnc-rs && patch -p1 < ../vnc-rs-screen-size-limit.patch)
+(cd third_party/vnc-rs && patch -p1 < ../vnc-rs-zrle-bulk-inflate.patch)
 ```

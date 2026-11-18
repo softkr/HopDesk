@@ -48,12 +48,6 @@ impl<'a> ZlibReader<'a> {
             ))
         }
     }
-
-    pub fn read_u8(&mut self) -> std::io::Result<u8> {
-        let mut buf = [0; 1];
-        self.read_exact(&mut buf)?;
-        Ok(buf[0])
-    }
 }
 
 impl Read for ZlibReader<'_> {
