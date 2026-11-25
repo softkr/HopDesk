@@ -47,6 +47,9 @@ pub enum Command {
     Decline,
     /// End the task now.
     Stop,
+    /// The person is busy on the screen: proposed actions wait for an answer instead of
+    /// running by themselves.
+    Hold,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +78,9 @@ pub enum Event {
     Proposal(Vec<(String, Option<Point>)>),
     /// Where the AI's pointer is on the remote screen.
     Pointer(Point),
+    /// The proposed actions run by themselves after this long unless declined; `None` once
+    /// they wait for an answer after all.
+    AutoApprove(Option<Duration>),
 }
 
 /// The remote screen and input of a session.
@@ -89,6 +95,8 @@ pub trait Remote: Send {
 pub struct Options {
     /// Every batch of actions waits for the person's approval.
     pub approve: bool,
+    /// Proposed actions run by themselves when the person does not decline within this time.
+    pub auto_approve: Option<Duration>,
     pub coordinates: Coordinates,
 }
 
@@ -117,6 +125,7 @@ pub async fn run<P: Provider, R: Remote>(
         emit: &emit,
         coordinates: options.coordinates,
         approve: options.approve,
+        auto_approve: options.auto_approve,
         scale: None,
     };
     let mut commands = Commands {
@@ -150,6 +159,7 @@ struct Agent<'a, R, E> {
     emit: &'a E,
     coordinates: Coordinates,
     approve: bool,
+    auto_approve: Option<Duration>,
     /// How the last screenshot the model saw maps onto the screen.
     scale: Option<Scale>,
 }
@@ -200,7 +210,9 @@ impl<R: Remote, E: Fn(Event) + Send + Sync> Agent<'_, R, E> {
             if confirm || (self.approve && reply.calls.iter().any(needs_approval)) {
                 (self.emit)(Event::Proposal(reply.calls.iter().flat_map(describe).collect()));
                 (self.emit)(Event::State(State::Approval));
-                match approval(commands).await {
+                // A provider's safety check is never answered by a timer.
+                let auto = if confirm { None } else { self.auto_approve };
+                match self.approval(commands, auto).await {
                     Approval::Approved => {}
                     approval => {
                         let reason = if matches!(approval, Approval::Stopped(_)) { STOPPED } else { DECLINED };
@@ -225,9 +237,13 @@ impl<R: Remote, E: Fn(Event) + Send + Sync> Agent<'_, R, E> {
             }
             if self.taken_over.swap(false, Ordering::Relaxed) {
                 (self.emit)(Event::State(State::TakenOver));
-                (self.emit)(Event::Notice("직접 조작하셔서 멈췄습니다. 계속하려면 '계속'을 누르세요.".into()));
-                match approval(commands).await {
-                    Approval::Approved => provider.user(RESUME, self.screenshot().await.ok().as_ref()),
+                (self.emit)(Event::Notice(
+                    "직접 조작하셔서 일시 정지했습니다. 이어서 하려면 '계속'을 누르세요.".into(),
+                ));
+                match self.approval(commands, None).await {
+                    Approval::Approved => {
+                        provider.user(RESUME, self.screenshot().await.ok().as_ref())
+                    }
                     Approval::Declined | Approval::Stopped(None) => return Ended::Stopped,
                     Approval::Stopped(Some(text)) => {
                         provider.user(&text, self.screenshot().await.ok().as_ref());
@@ -236,6 +252,36 @@ impl<R: Remote, E: Fn(Event) + Send + Sync> Agent<'_, R, E> {
             }
         }
         Ended::Failed(format!("한 작업에 {MAX_STEPS}단계를 넘어 멈췄습니다."))
+    }
+
+    /// Waits for the person's answer; with `auto`, no answer in that time approves, unless the
+    /// person is busy on the screen ([`Command::Hold`]).
+    async fn approval(&self, commands: &mut Commands, auto: Option<Duration>) -> Approval {
+        let mut deadline = auto.map(|after| tokio::time::Instant::now() + after);
+        if auto.is_some() {
+            (self.emit)(Event::AutoApprove(auto));
+        }
+        loop {
+            let command = match deadline {
+                Some(at) => tokio::select! {
+                    biased;
+                    command = commands.recv() => command,
+                    () = tokio::time::sleep_until(at) => return Approval::Approved,
+                },
+                None => commands.recv().await,
+            };
+            match command {
+                Some(Command::Approve) => return Approval::Approved,
+                Some(Command::Decline) => return Approval::Declined,
+                Some(Command::Say(text)) => return Approval::Stopped(Some(text)),
+                Some(Command::Stop) | None => return Approval::Stopped(None),
+                Some(Command::Hold) => {
+                    if deadline.take().is_some() {
+                        (self.emit)(Event::AutoApprove(None));
+                    }
+                }
+            }
+        }
     }
 
     /// Carries out the calls in order, up to the first failure, takeover or stop; returns one
@@ -354,22 +400,13 @@ enum Approval {
     Stopped(Option<String>),
 }
 
-async fn approval(commands: &mut Commands) -> Approval {
-    match commands.recv().await {
-        Some(Command::Approve) => Approval::Approved,
-        Some(Command::Decline) => Approval::Declined,
-        Some(Command::Say(text)) => Approval::Stopped(Some(text)),
-        Some(Command::Stop) | None => Approval::Stopped(None),
-    }
-}
-
 /// Resolves when the person stops the task or writes something new (returned).
 async fn wait_for_stop(commands: &mut Commands) -> Option<String> {
     loop {
         match commands.recv().await {
             Some(Command::Stop) | None => return None,
             Some(Command::Say(text)) => return Some(text),
-            Some(Command::Approve | Command::Decline) => {}
+            Some(Command::Approve | Command::Decline | Command::Hold) => {}
         }
     }
 }
@@ -521,7 +558,13 @@ mod tests {
     }
 
     /// Runs the agent on `replies` with `commands` already queued, until they run out.
-    fn run_script(replies: Vec<Reply>, commands: Vec<Command>, approve: bool, take_over: bool) -> Run {
+    fn run_script(
+        replies: Vec<Reply>,
+        commands: Vec<Command>,
+        approve: bool,
+        take_over: bool,
+        auto_approve: Option<Duration>,
+    ) -> Run {
         let log = Arc::new(Mutex::new(Vec::new()));
         let acted = Arc::new(Mutex::new(Vec::new()));
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -549,6 +592,7 @@ mod tests {
                 move |event| sink.lock().unwrap().push(event),
                 Options {
                     approve,
+                    auto_approve,
                     coordinates: Coordinates::Pixels,
                 },
             ));
@@ -579,7 +623,13 @@ mod tests {
                 calls: vec![],
             },
         ];
-        let run = run_script(replies, vec![Command::Say("해 줘".into())], false, false);
+        let run = run_script(
+            replies,
+            vec![Command::Say("해 줘".into())],
+            false,
+            false,
+            None,
+        );
         assert_eq!(run.acted.len(), 2);
         assert_eq!(
             run.log,
@@ -596,7 +646,7 @@ mod tests {
             text: String::new(),
             calls: vec![broken, click("b")],
         }];
-        let run = run_script(replies, vec![Command::Say("go".into())], false, false);
+        let run = run_script(replies, vec![Command::Say("go".into())], false, false, None);
         assert!(run.acted.is_empty());
         assert_eq!(run.log[1], "result a error bad coordinate");
         assert_eq!(run.log[2], format!("result b error {NOT_EXECUTED}"));
@@ -608,10 +658,57 @@ mod tests {
             text: String::new(),
             calls: vec![click("a")],
         }];
-        let run = run_script(replies, vec![Command::Say("go".into()), Command::Decline], true, false);
+        let run = run_script(
+            replies,
+            vec![Command::Say("go".into()), Command::Decline],
+            true,
+            false,
+            None,
+        );
         assert!(run.acted.is_empty());
         assert!(run.events.iter().any(|event| matches!(event, Event::Proposal(list) if list[0].0 == "클릭")));
         assert_eq!(run.log[1], format!("result a error {DECLINED}"));
+    }
+
+    #[test]
+    fn unanswered_actions_run_by_themselves_when_asked_to() {
+        let reply = || {
+            vec![Reply {
+                text: String::new(),
+                calls: vec![click("a")],
+            }]
+        };
+        let auto = Some(Duration::from_secs(3));
+        let say = || Command::Say("go".into());
+        let run = run_script(reply(), vec![say()], true, false, auto);
+        assert_eq!(run.acted.len(), 1, "nobody declined in time");
+        assert!(run.events.contains(&Event::AutoApprove(auto)));
+        let run = run_script(reply(), vec![say(), Command::Decline], true, false, auto);
+        assert!(run.acted.is_empty(), "declined in time");
+        let run = run_script(reply(), vec![say(), Command::Hold], true, false, auto);
+        assert!(
+            run.acted.is_empty(),
+            "the person is busy: it waits for an answer"
+        );
+        assert!(run.events.contains(&Event::AutoApprove(None)));
+    }
+
+    #[test]
+    fn a_safety_check_is_never_approved_by_the_timer() {
+        let mut call = click("a");
+        call.confirm = Some("Suspicious".into());
+        let replies = vec![Reply {
+            text: String::new(),
+            calls: vec![call],
+        }];
+        let run = run_script(
+            replies,
+            vec![Command::Say("go".into())],
+            true,
+            false,
+            Some(Duration::from_secs(3)),
+        );
+        assert!(run.acted.is_empty());
     }
 
     #[test]
@@ -620,7 +717,13 @@ mod tests {
             text: String::new(),
             calls: vec![click("a")],
         }];
-        let run = run_script(replies, vec![Command::Say("go".into()), Command::Approve], true, false);
+        let run = run_script(
+            replies,
+            vec![Command::Say("go".into()), Command::Approve],
+            true,
+            false,
+            None,
+        );
         assert_eq!(run.acted.len(), 1);
     }
 
@@ -633,7 +736,13 @@ mod tests {
             },
             Reply::default(),
         ];
-        let run = run_script(replies, vec![Command::Say("go".into()), Command::Approve], false, true);
+        let run = run_script(
+            replies,
+            vec![Command::Say("go".into()), Command::Approve],
+            false,
+            true,
+            None,
+        );
         assert_eq!(run.acted.len(), 1, "the second click waits for the person");
         assert_eq!(run.log[2], format!("result b error {TAKEN_OVER}"));
         assert!(run.events.contains(&Event::State(State::TakenOver)));

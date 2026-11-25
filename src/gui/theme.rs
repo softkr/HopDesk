@@ -28,40 +28,42 @@ pub struct Palette {
     pub danger_soft: Color32,
 }
 
+/// macOS system colors: grouped gray backgrounds, white surfaces, hairline separators and the
+/// system blue as the accent. Text colors are the accessible variants (at least 4.5:1).
 pub const LIGHT: Palette = Palette {
-    bg: Color32::from_rgb(0xF7, 0xF8, 0xFA),
-    sidebar: Color32::from_rgb(0xEF, 0xF1, 0xF4),
+    bg: Color32::from_rgb(0xF5, 0xF5, 0xF7),
+    sidebar: Color32::from_rgb(0xEC, 0xEC, 0xF0),
     surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-    subtle: Color32::from_rgb(0xE6, 0xE9, 0xEE),
-    border: Color32::from_rgb(0xDC, 0xE0, 0xE6),
-    control_border: Color32::from_rgb(0x8A, 0x92, 0x9D),
-    text: Color32::from_rgb(0x1F, 0x23, 0x28),
-    text_weak: Color32::from_rgb(0x65, 0x6D, 0x78),
-    accent: Color32::from_rgb(0x04, 0x78, 0x57),
-    accent_soft: Color32::from_rgb(0xD7, 0xF2, 0xE6),
+    subtle: Color32::from_rgb(0xE8, 0xE8, 0xED),
+    border: Color32::from_rgb(0xE2, 0xE2, 0xE7),
+    control_border: Color32::from_rgb(0xC7, 0xC7, 0xCC),
+    text: Color32::from_rgb(0x1D, 0x1D, 0x1F),
+    text_weak: Color32::from_rgb(0x6E, 0x6E, 0x73),
+    accent: Color32::from_rgb(0x00, 0x71, 0xE3),
+    accent_soft: Color32::from_rgb(0xDD, 0xEB, 0xFF),
     on_accent: Color32::WHITE,
-    success: Color32::from_rgb(0x16, 0xA3, 0x4A),
-    warning: Color32::from_rgb(0xD9, 0x77, 0x06),
-    danger: Color32::from_rgb(0xDC, 0x26, 0x26),
-    danger_soft: Color32::from_rgb(0xFD, 0xEC, 0xEC),
+    success: Color32::from_rgb(0x24, 0x8A, 0x3D),
+    warning: Color32::from_rgb(0xC9, 0x34, 0x00),
+    danger: Color32::from_rgb(0xD7, 0x00, 0x15),
+    danger_soft: Color32::from_rgb(0xFF, 0xE9, 0xEA),
 };
 
 pub const DARK: Palette = Palette {
-    bg: Color32::from_rgb(0x1B, 0x1D, 0x21),
-    sidebar: Color32::from_rgb(0x15, 0x17, 0x1A),
-    surface: Color32::from_rgb(0x24, 0x27, 0x2C),
-    subtle: Color32::from_rgb(0x2E, 0x32, 0x38),
-    border: Color32::from_rgb(0x36, 0x3B, 0x42),
-    control_border: Color32::from_rgb(0x6E, 0x77, 0x83),
-    text: Color32::from_rgb(0xE6, 0xE8, 0xEB),
-    text_weak: Color32::from_rgb(0x9A, 0xA1, 0xAB),
-    accent: Color32::from_rgb(0x34, 0xD3, 0x99),
-    accent_soft: Color32::from_rgb(0x14, 0x3D, 0x30),
-    on_accent: Color32::from_rgb(0x06, 0x28, 0x1D),
-    success: Color32::from_rgb(0x3F, 0xB9, 0x50),
-    warning: Color32::from_rgb(0xE3, 0xA0, 0x08),
-    danger: Color32::from_rgb(0xFF, 0x7B, 0x72),
-    danger_soft: Color32::from_rgb(0x3A, 0x1F, 0x21),
+    bg: Color32::from_rgb(0x1C, 0x1C, 0x1E),
+    sidebar: Color32::from_rgb(0x15, 0x15, 0x17),
+    surface: Color32::from_rgb(0x2C, 0x2C, 0x2E),
+    subtle: Color32::from_rgb(0x3A, 0x3A, 0x3C),
+    border: Color32::from_rgb(0x3A, 0x3A, 0x3D),
+    control_border: Color32::from_rgb(0x5A, 0x5A, 0x5F),
+    text: Color32::from_rgb(0xF5, 0xF5, 0xF7),
+    text_weak: Color32::from_rgb(0xA1, 0xA1, 0xA6),
+    accent: Color32::from_rgb(0x0A, 0x84, 0xFF),
+    accent_soft: Color32::from_rgb(0x12, 0x33, 0x5C),
+    on_accent: Color32::WHITE,
+    success: Color32::from_rgb(0x30, 0xD1, 0x58),
+    warning: Color32::from_rgb(0xFF, 0x9F, 0x0A),
+    danger: Color32::from_rgb(0xFF, 0x69, 0x61),
+    danger_soft: Color32::from_rgb(0x3A, 0x1D, 0x1F),
 };
 
 pub fn palette(ui: &Ui) -> Palette {
@@ -72,10 +74,10 @@ pub fn palette(ui: &Ui) -> Palette {
 pub const TITLE_SIZE: f32 = 16.0;
 pub const HEADING_SIZE: f32 = 22.0;
 
-pub const RADIUS: u8 = 8;
-pub const CARD_RADIUS: u8 = 12;
+pub const RADIUS: u8 = 9;
+pub const CARD_RADIUS: u8 = 16;
 /// Hero controls (large buttons) and floating overlays (toasts): slightly rounder than inputs.
-pub const FLOAT_RADIUS: u8 = 10;
+pub const FLOAT_RADIUS: u8 = 12;
 
 pub fn bold_family() -> FontFamily {
     FontFamily::Name("bold".into())
@@ -128,6 +130,30 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// How far right of the scrolled content the scroll bar's outer edge sits, in the margin every
+/// scroll area has beside it (12 points or more): 7 points of space between content and bar.
+const SCROLL_BAR_OFFSET: f32 = 12.0;
+/// The scroll bar stays this long after the last scroll, then fades out over `SCROLL_BAR_FADE`.
+const SCROLL_BAR_LINGER: f32 = 0.8;
+const SCROLL_BAR_FADE: f32 = 0.3;
+/// The knob's opacity while shown.
+const SCROLL_BAR_OPACITY: f32 = 0.35;
+
+/// Shows the scroll bar of the area under the pointer while it scrolls and fades it out after;
+/// called every frame. Pointing at the bar itself still shows it, to drag it.
+pub fn fade_scroll_bars(ctx: &egui::Context) {
+    let idle = ctx.input(|i| i.time_since_last_scroll());
+    let shown = (1.0 - (idle - SCROLL_BAR_LINGER) / SCROLL_BAR_FADE).clamp(0.0, 1.0);
+    let opacity = SCROLL_BAR_OPACITY * shown;
+    if (ctx.global_style().spacing.scroll.active_handle_opacity - opacity).abs() > f32::EPSILON {
+        ctx.all_styles_mut(|style| style.spacing.scroll.active_handle_opacity = opacity);
+    }
+    // Keep drawing until it has faded.
+    if shown > 0.0 {
+        ctx.request_repaint();
+    }
+}
+
 pub fn apply(ctx: &egui::Context) {
     install_fonts(ctx);
     // Icons are SVGs (see `widgets::Icon`).
@@ -156,6 +182,19 @@ pub fn apply(ctx: &egui::Context) {
             s.button_padding = Vec2::new(14.0, 7.0);
             s.interact_size.y = 32.0;
             s.menu_margin = Margin::same(6);
+            // Overlay scroll bars like macOS: a thin translucent grey knob that widens under the
+            // pointer, out in the margin beside the content rather than on it. It shows while
+            // scrolling and fades once scrolling stops (`fade_scroll_bars`).
+            s.scroll = egui::style::ScrollStyle {
+                floating_width: 5.0,
+                bar_width: 8.0,
+                bar_outer_margin: -SCROLL_BAR_OFFSET,
+                active_handle_opacity: 0.0,
+                interact_handle_opacity: 0.5,
+                active_background_opacity: 0.0,
+                interact_background_opacity: 0.0,
+                ..egui::style::ScrollStyle::floating()
+            };
 
             let v = &mut style.visuals;
             v.panel_fill = pal.bg;
@@ -187,11 +226,12 @@ pub fn apply(ctx: &egui::Context) {
             let hover_fill = if pal.bg == DARK.bg {
                 pal.subtle.gamma_multiply(1.35)
             } else {
-                Color32::from_rgb(0xDC, 0xE1, 0xE8)
+                Color32::from_rgb(0xDE, 0xDE, 0xE3)
             };
             w.hovered.weak_bg_fill = hover_fill;
             w.hovered.bg_fill = hover_fill;
-            w.hovered.bg_stroke = Stroke::new(1.0, pal.accent);
+            // Hovering changes the fill only; the accent outline is for keyboard focus.
+            w.hovered.bg_stroke = Stroke::new(1.0, pal.control_border);
             w.hovered.fg_stroke = Stroke::new(1.5, pal.text);
             w.hovered.corner_radius = radius;
             w.hovered.expansion = 0.0;

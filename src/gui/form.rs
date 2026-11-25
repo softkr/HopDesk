@@ -8,7 +8,7 @@ use eframe::egui::{self, RichText, Ui};
 use uuid::Uuid;
 
 use super::theme::{Bold as _, palette};
-use super::widgets::{self, card, field, section_title, text_input};
+use super::widgets::{self, Icon, card, field, section_title, text_input};
 use crate::profile::{DisplayMode, JumpHost, Profile, ProfileStore, Protocol, Secret, Target, Vpn};
 use crate::vpn;
 
@@ -588,6 +588,7 @@ impl Form {
             let err = |f: Field| errors.get(&f).map(String::as_str);
 
             card(ui, |ui| {
+                section_title(ui, Icon::Monitor, pal.accent, "연결", None);
                 let edit = text_input(ui, &mut self.name, "예: 사무실 PC", full, err(Field::Name).is_some());
                 let response = field(ui, "연결 이름", err(Field::Name), |ui| ui.add(edit));
                 if std::mem::take(&mut self.focus_pending) {
@@ -596,12 +597,13 @@ impl Form {
                 field(ui, "종류", None, |ui| {
                     if self.is_new() {
                         let mut protocol = self.protocol;
+                        // Short names, as on the list's tags; the icon says what each is.
                         let options = [
-                            (Protocol::Rdp, protocol_label(Protocol::Rdp)),
-                            (Protocol::Ssh, protocol_label(Protocol::Ssh)),
-                            (Protocol::Vnc, protocol_label(Protocol::Vnc)),
+                            (Protocol::Rdp, Icon::Monitor, "RDP"),
+                            (Protocol::Ssh, Icon::Terminal, "SSH"),
+                            (Protocol::Vnc, Icon::ScreenShare, "VNC"),
                         ];
-                        if widgets::segmented(ui, &mut protocol, &options) {
+                        if widgets::segmented_icons(ui, &mut protocol, &options) {
                             self.set_protocol(protocol);
                         }
                     } else {
@@ -612,11 +614,15 @@ impl Form {
 
             card(ui, |ui| {
                 let description = format!("{}에 닿는 방법을 고르세요.", super::target_noun(self.protocol));
-                section_title(ui, "접속 경로", Some(description.as_str()));
+                section_title(ui, Icon::Route, INDIGO, "접속 경로", Some(description.as_str()));
                 field(ui, "방식", None, |ui| {
                     let mut route = self.route();
-                    let options = [(Route::Direct, "직접 접속"), (Route::Jump, "SSH 점프 호스트"), (Route::Vpn, "VPN (WireGuard)")];
-                    if widgets::segmented(ui, &mut route, &options) {
+                    let options = [
+                        (Route::Direct, Icon::ArrowRight, "직접 접속"),
+                        (Route::Jump, Icon::Server, "SSH 점프 호스트"),
+                        (Route::Vpn, Icon::Shield, "VPN (WireGuard)"),
+                    ];
+                    if widgets::segmented_icons(ui, &mut route, &options) {
                         self.set_route(route);
                     }
                 });
@@ -658,11 +664,12 @@ impl Form {
                     (&mut self.jump_host, "예: bastion.example.com", err(Field::JumpHost)),
                     (&mut self.jump_port, err(Field::JumpPort)),
                 );
-                let edit = text_input(ui, &mut self.jump_user, "예: ubuntu", full, err(Field::JumpUser).is_some());
+                let edit =
+                    text_input(ui, &mut self.jump_user, "예: ubuntu", full, err(Field::JumpUser).is_some()).leading_icon(Icon::User);
                 field(ui, "사용자 이름", err(Field::JumpUser), |ui| ui.add(edit));
 
                 field(ui, "인증 방식", None, |ui| {
-                    if widgets::segmented(ui, &mut self.auth, &[(Auth::Password, "비밀번호"), (Auth::Key, "개인 키")]) {
+                    if widgets::segmented_icons(ui, &mut self.auth, &AUTH_OPTIONS) {
                         self.jump_secret.clear();
                         self.change_jump_secret = self.is_new() || self.auth_switched();
                     }
@@ -678,7 +685,7 @@ impl Form {
                             }
                             let invalid = err(Field::KeyPath).is_some();
                             let w = ui.available_width();
-                            ui.add(text_input(ui, &mut self.key_path, "예: ~/.ssh/id_ed25519", w, invalid));
+                            ui.add(text_input(ui, &mut self.key_path, "예: ~/.ssh/id_ed25519", w, invalid).leading_icon(Icon::FileKey));
                         });
                     });
                 }
@@ -718,7 +725,7 @@ impl Form {
                 } else {
                     format!("이 기기에서 바로 접근할 수 있는 주소를 입력하세요. 예: {example}")
                 };
-                section_title(ui, title, Some(description.as_str()));
+                section_title(ui, Icon::Globe, ORANGE, title, Some(description.as_str()));
                 host_port_row(
                     ui,
                     full,
@@ -728,8 +735,8 @@ impl Form {
                 if self.protocol == Protocol::Rdp {
                     ui.horizontal(|ui| {
                         let half = (full - 8.0) / 2.0;
-                        let edit =
-                            text_input(ui, &mut self.target_user, "예: Administrator", half, err(Field::TargetUser).is_some());
+                        let edit = text_input(ui, &mut self.target_user, "예: Administrator", half, err(Field::TargetUser).is_some())
+                            .leading_icon(Icon::User);
                         field(ui, "Windows 사용자 이름", err(Field::TargetUser), |ui| ui.add(edit));
                         let edit = text_input(ui, &mut self.domain, "선택 사항", half, false);
                         field(ui, "도메인", None, |ui| ui.add(edit));
@@ -752,11 +759,11 @@ impl Form {
                     return;
                 }
 
-                let edit = text_input(ui, &mut self.target_user, "예: ubuntu", full, err(Field::TargetUser).is_some());
+                let edit =
+                    text_input(ui, &mut self.target_user, "예: ubuntu", full, err(Field::TargetUser).is_some()).leading_icon(Icon::User);
                 field(ui, "사용자 이름", err(Field::TargetUser), |ui| ui.add(edit));
                 field(ui, "인증 방식", None, |ui| {
-                    let options = [(Auth::Password, "비밀번호"), (Auth::Key, "개인 키")];
-                    if widgets::segmented(ui, &mut self.target_auth, &options) {
+                    if widgets::segmented_icons(ui, &mut self.target_auth, &AUTH_OPTIONS) {
                         self.target_secret.clear();
                         self.change_target_secret = self.is_new() || self.target_auth_switched();
                     }
@@ -771,7 +778,9 @@ impl Form {
                             }
                             let invalid = err(Field::TargetKeyPath).is_some();
                             let w = ui.available_width();
-                            ui.add(text_input(ui, &mut self.target_key_path, "예: ~/.ssh/id_ed25519", w, invalid));
+                            ui.add(
+                                text_input(ui, &mut self.target_key_path, "예: ~/.ssh/id_ed25519", w, invalid).leading_icon(Icon::FileKey),
+                            );
                         });
                     });
                 }
@@ -795,7 +804,7 @@ impl Form {
             // Screen settings apply to the remote desktop only.
             if self.protocol == Protocol::Rdp {
                 card(ui, |ui| {
-                    section_title(ui, "세션", None);
+                    section_title(ui, Icon::Settings, GREY, "세션", None);
                     field(ui, "해상도", err(Field::Resolution), |ui| {
                         ui.horizontal(|ui| {
                             let fixed = self.display == DisplayMode::Fixed;
@@ -847,6 +856,7 @@ impl Form {
                     });
                     field(ui, "공유 폴더", None, |ui| {
                         ui.horizontal(|ui| {
+                            ui.add(Icon::Folder.image(widgets::ICON_SM, pal.text_weak));
                             ui.label(RichText::new(display_path(shared_folder)).color(pal.text));
                             ui.add_space(4.0);
                             if ui.button("열기").clicked() {
@@ -891,7 +901,8 @@ impl Form {
         if let Some(error) = &self.vpn_import_error {
             ui.label(RichText::new(error).color(pal.danger));
         }
-        let edit = text_input(ui, &mut self.vpn_endpoint, "예: vpn.example.com:51820", full, err(Field::VpnEndpoint).is_some());
+        let edit = text_input(ui, &mut self.vpn_endpoint, "예: vpn.example.com:51820", full, err(Field::VpnEndpoint).is_some())
+            .leading_icon(Icon::Globe);
         field(ui, "VPN 서버 (Endpoint)", err(Field::VpnEndpoint), |ui| ui.add(edit));
         ui.horizontal(|ui| {
             let keepalive_w = 220.0;
@@ -931,7 +942,8 @@ impl Form {
     /// VNC target: an optional macOS account and the password.
     fn vnc_fields(&mut self, ui: &mut Ui, full: f32, errors: &Errors) {
         let err = |f: Field| errors.get(&f).map(String::as_str);
-        let edit = text_input(ui, &mut self.target_user, "비워 두면 VNC 비밀번호로 접속", full, err(Field::TargetUser).is_some());
+        let edit = text_input(ui, &mut self.target_user, "비워 두면 VNC 비밀번호로 접속", full, err(Field::TargetUser).is_some())
+            .leading_icon(Icon::User);
         field(ui, "macOS 계정 (선택)", err(Field::TargetUser), |ui| ui.add(edit));
         let (label, hint) = if self.vnc_account() {
             ("macOS 비밀번호", "")
@@ -952,6 +964,14 @@ impl Form {
     }
 }
 
+/// Section tile colors (system indigo, orange and grey); the first section uses the accent.
+const INDIGO: egui::Color32 = egui::Color32::from_rgb(0x5E, 0x5C, 0xE6);
+const ORANGE: egui::Color32 = egui::Color32::from_rgb(0xFF, 0x9F, 0x0A);
+const GREY: egui::Color32 = egui::Color32::from_rgb(0x8E, 0x8E, 0x93);
+
+/// Password or key, with their icons, for both the jump host and an SSH target.
+const AUTH_OPTIONS: [(Auth, Icon, &str); 2] = [(Auth::Password, Icon::Lock, "비밀번호"), (Auth::Key, Icon::Key, "개인 키")];
+
 fn protocol_label(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::Rdp => "원격 데스크톱 (RDP)",
@@ -968,7 +988,7 @@ fn host_port_row(
 ) {
     ui.horizontal(|ui| {
         let port_w = 80.0;
-        let edit = text_input(ui, host, host_hint, full - port_w - 8.0, host_err.is_some());
+        let edit = text_input(ui, host, host_hint, full - port_w - 8.0, host_err.is_some()).leading_icon(Icon::Globe);
         field(ui, "주소", host_err, |ui| ui.add(edit));
         let edit = text_input(ui, port, "", port_w, port_err.is_some());
         field(ui, "포트", port_err, |ui| ui.add(edit));
@@ -1011,7 +1031,7 @@ fn secret_field(
                 ui.data_mut(|d| d.insert_temp(id, shown));
             }
             let w = ui.available_width();
-            ui.add(text_input(ui, value, hint, w, error.is_some()).password(!shown));
+            ui.add(text_input(ui, value, hint, w, error.is_some()).password(!shown).leading_icon(Icon::Lock));
         });
     });
 }

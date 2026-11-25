@@ -93,6 +93,9 @@ fn package_suffix() -> Option<&'static str> {
     }
 }
 
+/// Set (to anything) to turn update checks off, as the debug bundle does.
+pub const DISABLE_ENV: &str = "HOPDESK_NO_UPDATE";
+
 /// Downloads, verifies and installs `release` over the running app, then starts the new version.
 /// The caller should exit right after.
 pub fn install(release: &Release) -> anyhow::Result<()> {

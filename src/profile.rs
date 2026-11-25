@@ -221,6 +221,9 @@ pub struct AiSettings {
     /// How a compatible server's model gives positions.
     #[serde(default)]
     pub coordinates: crate::agent::action::Coordinates,
+    /// Proposed actions run by themselves when not declined within a few seconds.
+    #[serde(default)]
+    pub auto_approve: bool,
 }
 
 impl Default for AiSettings {
@@ -231,6 +234,7 @@ impl Default for AiSettings {
             model: default_ai_model(),
             base_url: String::new(),
             coordinates: crate::agent::action::Coordinates::default(),
+            auto_approve: false,
         }
     }
 }

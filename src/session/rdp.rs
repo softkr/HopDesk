@@ -26,12 +26,15 @@ use crate::tunnel::Tunnel;
 mod agent_input;
 mod assistant;
 mod canvas;
+mod icons;
 mod overlay;
 
 /// Events of the session window: the RDP client's output, and the AI assistant's.
 enum SessionEvent {
     Rdp(RdpOutputEvent),
     Agent(crate::agent::Event),
+    /// A frame of the assistant's own motion.
+    Tick,
     /// The assistant asks for the current screen.
     Snapshot(tokio::sync::oneshot::Sender<anyhow::Result<crate::agent::capture::Pixels>>),
 }
@@ -199,8 +202,13 @@ impl ApplicationHandler<SessionEvent> for SessionWindow {
                 }
             }
             SessionEvent::Agent(event) => {
-                if let Some(assistant) = &self.assistant {
+                if let Some(assistant) = &mut self.assistant {
                     assistant.agent_event(&self.app, event);
+                }
+            }
+            SessionEvent::Tick => {
+                if let Some(assistant) = &self.assistant {
+                    assistant.tick(&self.app);
                 }
             }
             SessionEvent::Snapshot(reply) => {

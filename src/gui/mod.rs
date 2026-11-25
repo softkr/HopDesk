@@ -252,6 +252,10 @@ impl Launcher {
         let (state, notices, ctx) = (self.update.clone(), self.update_notices.clone(), ctx.clone());
         std::thread::spawn(move || {
             let _keep_open = keep_open;
+            // A test build must not replace itself with the released app.
+            if std::env::var_os(update::DISABLE_ENV).is_some() {
+                return;
+            }
             let mut asked = false;
             loop {
                 let notice = if cfg!(debug_assertions) {
@@ -574,7 +578,7 @@ impl Launcher {
                 {
                     self.navigate(Nav::New);
                 }
-                if widgets::quiet_button(ui, widgets::Icon::Settings, "AI", 30.0)
+                if widgets::quiet_button(ui, widgets::Icon::Sparkles, "AI", 30.0)
                     .on_hover_text("AI 공동 작업자 설정")
                     .clicked()
                 {
@@ -928,6 +932,7 @@ impl eframe::App for Launcher {
         if let Some(tray) = &self.tray {
             tray.hide_on_close(ui.ctx());
         }
+        theme::fade_scroll_bars(ui.ctx());
         self.draw(ui);
     }
 }

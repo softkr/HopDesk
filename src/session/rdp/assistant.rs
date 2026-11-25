@@ -24,9 +24,17 @@ use crate::agent::action::{Action, Point};
 use crate::agent::capture::Pixels;
 use crate::agent::{self, Command, Event, Options, Remote, State, provider};
 
+/// Time between redraws while the overlay moves on its own.
+const ANIMATION_FRAME: Duration = Duration::from_millis(33);
+/// How long proposed actions wait to be declined before they run by themselves.
+const AUTO_APPROVE_AFTER: Duration = Duration::from_secs(3);
 /// Bubble lines per wheel notch, and trackpad points per line.
 const LINES_PER_NOTCH: f32 = 3.0;
 const PIXELS_PER_LINE: f32 = 20.0;
+/// A press on the character: where it began, the character's corner then, and whether the
+/// pointer has moved far enough to be a drag.
+type Drag = ((f32, f32), (f32, f32), bool);
+
 /// How far the pointer moves (physical pixels) before pressing the character drags it.
 const DRAG_THRESHOLD: f32 = 4.0;
 /// Fast-path input events per message, within the PDU header's count.
@@ -41,13 +49,15 @@ pub(super) struct Assistant {
     commands: mpsc::UnboundedSender<Command>,
     /// Set when the person uses the session while the AI works.
     taken_over: Arc<AtomicBool>,
+    /// Set while the overlay moves on its own.
+    animating: Arc<AtomicBool>,
     /// Last pointer position over the window, in physical pixels.
     cursor: (f32, f32),
     /// The release of a click the overlay took.
     swallow_release: bool,
     /// The character is pressed: where the press began, the character's corner then, and
     /// whether it has moved far enough to be a drag.
-    drag: Option<((f32, f32), (f32, f32), bool)>,
+    drag: Option<Drag>,
     /// The input method composes text (macOS sends typed text as commits then).
     ime_active: bool,
     /// Wheel movement over the bubble not yet amounting to a line.
@@ -93,10 +103,30 @@ pub(super) fn start(
     let overlay = Rc::new(RefCell::new(Overlay::new(text, &provider::destination(&settings))));
     let painter = {
         let overlay = Rc::clone(&overlay);
+        let started = std::time::Instant::now();
         Box::new(move |pixels: &mut [u32], width: usize, height: usize| {
-            overlay.borrow_mut().paint(pixels, width, height);
+            let mut overlay = overlay.borrow_mut();
+            overlay.set_time(started.elapsed().as_secs_f32());
+            overlay.paint(pixels, width, height);
         }) as OverlayPainter
     };
+    // While the overlay moves on its own (thinking, acting), the window is redrawn in step.
+    let animating = Arc::new(AtomicBool::new(false));
+    {
+        let (animating, proxy) = (Arc::clone(&animating), proxy.clone());
+        runtime.spawn(async move {
+            let mut frames = tokio::time::interval(ANIMATION_FRAME);
+            frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                frames.tick().await;
+                if animating.load(Ordering::Relaxed)
+                    && proxy.send_event(SessionEvent::Tick).is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
     let (commands, receiver) = mpsc::unbounded_channel();
     let taken_over = Arc::new(AtomicBool::new(false));
     let remote = RdpRemote {
@@ -111,6 +141,7 @@ pub(super) fn start(
     };
     let options = Options {
         approve: true,
+        auto_approve: settings.auto_approve.then_some(AUTO_APPROVE_AFTER),
         coordinates: provider::coordinates(&settings),
     };
     runtime.spawn(agent::run(provider, remote, receiver, Arc::clone(&taken_over), emit, options));
@@ -119,6 +150,7 @@ pub(super) fn start(
         overlay,
         commands,
         taken_over,
+        animating,
         cursor: (0.0, 0.0),
         swallow_release: false,
         drag: None,
@@ -189,10 +221,26 @@ impl Assistant {
                 self.key(app, event);
                 true
             }
+            WindowEvent::ThemeChanged(theme) => {
+                self.overlay
+                    .borrow_mut()
+                    .set_dark(*theme == winit::window::Theme::Dark);
+                false
+            }
             WindowEvent::ModifiersChanged(_) if focused => true,
             WindowEvent::Ime(ime) => {
                 self.ime(ime);
                 focused
+            }
+            // Esc always reaches the assistant while it works or waits: stop, or decline.
+            WindowEvent::KeyboardInput { event, .. }
+                if event.logical_key == Key::Named(NamedKey::Escape)
+                    && self.overlay.borrow().state() != State::Idle =>
+            {
+                if event.state == ElementState::Pressed {
+                    self.escape();
+                }
+                true
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
@@ -208,6 +256,7 @@ impl Assistant {
             _ => false,
         };
         if consumed {
+            self.sync_animation();
             redraw(app);
         }
         consumed
@@ -250,21 +299,58 @@ impl Assistant {
         if let Some(window) = app.window() {
             #[expect(clippy::cast_possible_truncation, reason = "a display scale")]
             overlay.set_scale(window.scale_factor() as f32);
+            overlay.set_dark(window.theme() == Some(winit::window::Theme::Dark));
         }
     }
 
-    pub(super) fn agent_event(&self, app: &App, event: Event) {
+    pub(super) fn agent_event(&mut self, app: &App, event: Event) {
+        let mut answer = false;
         {
             let mut overlay = self.overlay.borrow_mut();
             match event {
-                Event::State(state) => overlay.set_state(state),
+                Event::State(state) => {
+                    overlay.set_state(state);
+                    answer = state == State::TakenOver;
+                }
                 Event::Say(text) => overlay.say(text),
                 Event::Notice(text) => overlay.notice(text),
-                Event::Proposal(proposal) => overlay.propose(proposal),
+                Event::Proposal(proposal) => {
+                    overlay.propose(proposal);
+                    answer = true;
+                }
                 Event::Pointer(point) => overlay.set_pointer(point),
+                Event::AutoApprove(after) => {
+                    overlay.set_countdown(after.map(|after| after.as_secs_f32()))
+                }
             }
         }
+        self.sync_animation();
+        // The person is asked: the keyboard goes to the assistant, so Return and Esc answer.
+        if answer {
+            self.set_focus(app, true);
+        }
         redraw(app);
+    }
+
+    /// A frame of the overlay's own motion.
+    pub(super) fn tick(&self, app: &App) {
+        redraw(app);
+        self.sync_animation();
+    }
+
+    /// Esc: stops the AI while it works, declines what it proposes.
+    fn escape(&self) {
+        let command = match self.overlay.borrow().state() {
+            State::Approval => Command::Decline,
+            _ => Command::Stop,
+        };
+        let _ = self.commands.send(command);
+    }
+
+    fn send_input(&self) {
+        if let Some(text) = self.overlay.borrow_mut().take_input() {
+            let _ = self.commands.send(Command::Say(text));
+        }
     }
 
     /// The person used the session: while the AI works, that takes the screen back.
@@ -272,6 +358,20 @@ impl Assistant {
         if matches!(self.overlay.borrow().state(), State::Thinking | State::Acting) {
             self.taken_over.store(true, Ordering::Relaxed);
         }
+        self.hold();
+    }
+
+    /// The person is busy while a countdown runs: the proposal waits for an answer instead.
+    fn hold(&self) {
+        if self.overlay.borrow().counting() {
+            let _ = self.commands.send(Command::Hold);
+        }
+    }
+
+    /// Keeps the redraw ticks in step with whether the overlay moves on its own.
+    fn sync_animation(&self) {
+        self.animating
+            .store(self.overlay.borrow().animating(), Ordering::Relaxed);
     }
 
     fn click(&mut self, app: &App, hit: Hit) {
@@ -282,10 +382,17 @@ impl Assistant {
                 self.set_focus(app, true);
                 None
             }
+            Hit::Send => {
+                self.send_input();
+                None
+            }
             Hit::Approve => Some(Command::Approve),
             Hit::Decline => Some(Command::Decline),
             Hit::Stop => Some(Command::Stop),
-            Hit::Panel => None,
+            Hit::Panel => {
+                self.hold();
+                None
+            }
         };
         if let Some(command) = command {
             let _ = self.commands.send(command);
@@ -307,12 +414,23 @@ impl Assistant {
         if event.state != ElementState::Pressed {
             return;
         }
+        let state = self.overlay.borrow().state();
         let mut overlay = self.overlay.borrow_mut();
         match &event.logical_key {
+            // With nothing typed, Return answers what the assistant asks.
+            Key::Named(NamedKey::Enter)
+                if overlay.input_is_empty()
+                    && matches!(state, State::Approval | State::TakenOver) =>
+            {
+                let _ = self.commands.send(Command::Approve);
+            }
             Key::Named(NamedKey::Enter) => {
-                if let Some(text) = overlay.take_input() {
-                    let _ = self.commands.send(Command::Say(text));
-                }
+                drop(overlay);
+                self.send_input();
+            }
+            Key::Named(NamedKey::Escape) if state != State::Idle => {
+                drop(overlay);
+                self.escape();
             }
             Key::Named(NamedKey::Escape) => {
                 drop(overlay);
@@ -320,6 +438,10 @@ impl Assistant {
             }
             Key::Named(NamedKey::Backspace) => overlay.backspace(),
             _ => {
+                // Writing an answer: the proposal waits for it.
+                if overlay.counting() {
+                    let _ = self.commands.send(Command::Hold);
+                }
                 // With an input method on macOS, typed text arrives as commits instead.
                 let commits = self.ime_active && cfg!(target_os = "macos");
                 if let (Some(text), false) = (&event.text, commits) {

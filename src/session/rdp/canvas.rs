@@ -3,6 +3,8 @@
 
 use ab_glyph::{Font as _, FontVec, PxScale, ScaleFont as _, point};
 
+use super::icons::{self, Glyph};
+
 /// An `0xRRGGBB` color.
 pub(super) type Color = u32;
 
@@ -48,14 +50,172 @@ impl Canvas<'_> {
 
     /// A rounded rectangle; `alpha` applies to the whole shape.
     pub fn round_rect(&mut self, rect: Rect, radius: f32, color: Color, alpha: f32) {
-        let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0);
         self.shape(rect, color, alpha, |px, py| {
-            // Distance to the rectangle shrunk by the radius, minus the radius.
-            let dx = (px - (rect.x + rect.w / 2.0)).abs() - (rect.w / 2.0 - radius);
-            let dy = (py - (rect.y + rect.h / 2.0)).abs() - (rect.h / 2.0 - radius);
-            let outside = dx.max(0.0).hypot(dy.max(0.0));
-            outside + dx.max(dy).min(0.0) - radius
+            rounded_distance(rect, radius, px, py)
         });
+    }
+
+    /// The outline of a rounded rectangle, `width` wide, inside its edge.
+    pub fn round_rect_stroke(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        width: f32,
+        color: Color,
+        alpha: f32,
+    ) {
+        self.shape(rect, color, alpha, |px, py| {
+            (rounded_distance(rect, radius, px, py) + width / 2.0).abs() - width / 2.0
+        });
+    }
+
+    /// Frosted glass: what is behind the rounded rectangle, blurred and tinted by `strength`.
+    pub fn frost(&mut self, rect: Rect, radius: f32, tint: Color, strength: f32) {
+        /// Pixels per blur cell; the blur reaches about three cells.
+        const CELL: usize = 8;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped screen coordinates"
+        )]
+        let (left, top, right, bottom) = (
+            rect.x.floor().max(0.0) as usize,
+            rect.y.floor().max(0.0) as usize,
+            ((rect.x + rect.w).ceil().max(0.0) as usize).min(self.width),
+            ((rect.y + rect.h).ceil().max(0.0) as usize).min(self.height),
+        );
+        if left >= right || top >= bottom {
+            return;
+        }
+        let (gw, gh) = (
+            (right - left).div_ceil(CELL) + 1,
+            (bottom - top).div_ceil(CELL) + 1,
+        );
+        let channels = |pixel: u32| {
+            let [_, r, g, b] = pixel.to_be_bytes();
+            [f32::from(r), f32::from(g), f32::from(b)]
+        };
+        let mut grid = vec![[0.0f32; 3]; gw * gh];
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let mut sum = [0.0f32; 3];
+                for oy in [0, CELL / 2, CELL] {
+                    for ox in [0, CELL / 2, CELL] {
+                        let x = (left + gx * CELL + ox)
+                            .saturating_sub(CELL / 2)
+                            .clamp(left, right - 1);
+                        let y = (top + gy * CELL + oy)
+                            .saturating_sub(CELL / 2)
+                            .clamp(top, bottom - 1);
+                        let c = channels(self.pixels[y * self.width + x]);
+                        for i in 0..3 {
+                            sum[i] += c[i] / 9.0;
+                        }
+                    }
+                }
+                grid[gy * gw + gx] = sum;
+            }
+        }
+        for _ in 0..3 {
+            let source = grid.clone();
+            for gy in 0..gh {
+                for gx in 0..gw {
+                    let mut sum = [0.0f32; 3];
+                    for ny in gy.saturating_sub(1)..=(gy + 1).min(gh - 1) {
+                        for nx in gx.saturating_sub(1)..=(gx + 1).min(gw - 1) {
+                            for i in 0..3 {
+                                sum[i] += source[ny * gw + nx][i];
+                            }
+                        }
+                    }
+                    #[expect(clippy::cast_precision_loss, reason = "up to nine cells")]
+                    let count = (((gy + 1).min(gh - 1) - gy.saturating_sub(1) + 1)
+                        * ((gx + 1).min(gw - 1) - gx.saturating_sub(1) + 1))
+                        as f32;
+                    grid[gy * gw + gx] = sum.map(|v| v / count);
+                }
+            }
+        }
+        let tint = channels(tint);
+        for y in top..bottom {
+            for x in left..right {
+                #[expect(clippy::cast_precision_loss, reason = "screen coordinates")]
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let coverage = (0.5 - rounded_distance(rect, radius, px, py)).clamp(0.0, 1.0);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                #[expect(clippy::cast_precision_loss, reason = "screen coordinates")]
+                let (fx, fy) = (
+                    (x - left) as f32 / CELL as f32,
+                    (y - top) as f32 / CELL as f32,
+                );
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "within the grid"
+                )]
+                let (x0, y0) = ((fx as usize).min(gw - 1), (fy as usize).min(gh - 1));
+                let (x1, y1) = ((x0 + 1).min(gw - 1), (y0 + 1).min(gh - 1));
+                #[expect(clippy::cast_precision_loss, reason = "within the grid")]
+                let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+                let mut color = 0u32;
+                for i in 0..3 {
+                    let upper = grid[y0 * gw + x0][i] * (1.0 - tx) + grid[y0 * gw + x1][i] * tx;
+                    let lower = grid[y1 * gw + x0][i] * (1.0 - tx) + grid[y1 * gw + x1][i] * tx;
+                    let blurred = upper * (1.0 - ty) + lower * ty;
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "0 to 255"
+                    )]
+                    let value = (blurred + (tint[i] - blurred) * strength)
+                        .round()
+                        .clamp(0.0, 255.0) as u32;
+                    color = (color << 8) | value;
+                }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_possible_wrap,
+                    reason = "screen coordinates"
+                )]
+                self.blend(x as i32, y as i32, color, coverage);
+            }
+        }
+    }
+
+    /// A glossy sphere whose three colors swirl with `phase` (radians).
+    pub fn orb(&mut self, cx: f32, cy: f32, radius: f32, colors: [Color; 3], phase: f32) {
+        #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
+        let (left, top, right, bottom) = (
+            (cx - radius).floor() as i32 - 1,
+            (cy - radius).floor() as i32 - 1,
+            (cx + radius).ceil() as i32 + 1,
+            (cy + radius).ceil() as i32 + 1,
+        );
+        for y in top..bottom {
+            for x in left..right {
+                #[expect(clippy::cast_precision_loss, reason = "screen coordinates")]
+                let (dx, dy) = (
+                    (x as f32 + 0.5 - cx) / radius,
+                    (y as f32 + 0.5 - cy) / radius,
+                );
+                let distance = dx.hypot(dy);
+                let coverage = ((1.0 - distance) * radius + 0.5).clamp(0.0, 1.0);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let angle = dy.atan2(dx) + phase;
+                let first = 0.5 + 0.5 * (angle + distance * 2.0).sin();
+                let second = 0.5 + 0.5 * (angle - phase * 0.7 + dy * 1.5).cos();
+                let mut color = mix(mix(colors[0], colors[1], first), colors[2], second * 0.6);
+                // Light from the upper left, and a darker rim.
+                let highlight = (1.0 - (dx + 0.35).hypot(dy + 0.4) / 0.9).max(0.0);
+                color = mix(color, 0xff_ff_ff, highlight * highlight * 0.5);
+                color = mix(color, 0x00_00_00, distance.powi(3) * 0.2);
+                self.blend(x, y, color, coverage);
+            }
+        }
     }
 
     pub fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color, alpha: f32) {
@@ -66,6 +226,39 @@ impl Canvas<'_> {
             h: radius * 2.0,
         };
         self.shape(bounds, color, alpha, |px, py| (px - cx).hypot(py - cy) - radius);
+    }
+
+    /// An icon `size` pixels square centered on (`cx`, `cy`), tinted `color`.
+    pub fn icon(&mut self, glyph: Glyph, cx: f32, cy: f32, size: f32, color: Color, alpha: f32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small pixel size"
+        )]
+        let side = size.round().max(1.0) as usize;
+        let Some(mask) = icons::mask(glyph, side) else {
+            return;
+        };
+        #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
+        let (left, top) = (
+            (cx - size / 2.0).round() as i32,
+            (cy - size / 2.0).round() as i32,
+        );
+        for (index, coverage) in mask.coverage.iter().enumerate() {
+            if *coverage == 0 {
+                continue;
+            }
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_possible_wrap,
+                reason = "inside the icon"
+            )]
+            let (x, y) = (
+                left + (index % mask.size) as i32,
+                top + (index / mask.size) as i32,
+            );
+            self.blend(x, y, color, f32::from(*coverage) / 255.0 * alpha);
+        }
     }
 
     /// A ring of `width` around a circle.
@@ -100,6 +293,34 @@ impl Canvas<'_> {
             }
         }
     }
+}
+
+/// Distance from a point to a rounded rectangle's edge, negative inside.
+fn rounded_distance(rect: Rect, radius: f32, px: f32, py: f32) -> f32 {
+    let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0);
+    // Distance to the rectangle shrunk by the radius, minus the radius.
+    let dx = (px - (rect.x + rect.w / 2.0)).abs() - (rect.w / 2.0 - radius);
+    let dy = (py - (rect.y + rect.h / 2.0)).abs() - (rect.h / 2.0 - radius);
+    dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
+}
+
+/// The color `t` of the way from `a` to `b`.
+pub(super) fn mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let channel = |shift: u32| {
+        let (from, to) = (
+            f32::from(u8::try_from((a >> shift) & 0xff).unwrap_or(0)),
+            f32::from(u8::try_from((b >> shift) & 0xff).unwrap_or(0)),
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "0 to 255"
+        )]
+        let value = (from + (to - from) * t).round() as u32;
+        value << shift
+    };
+    channel(16) | channel(8) | channel(0)
 }
 
 /// Text in the OS UI font (Hangul included).
@@ -199,6 +420,35 @@ mod tests {
         assert_eq!(pixels[0], 0x80_40_00);
         canvas(&mut pixels, 1).blend(5, 0, 0xff_ff_ff, 1.0);
         assert_eq!(pixels[0], 0x80_40_00, "off the frame");
+    }
+
+    #[test]
+    fn frost_blurs_what_is_behind_and_tints_it() {
+        // Left half black, right half white.
+        let mut pixels: Vec<u32> = (0..64 * 64)
+            .map(|i| if i % 64 < 32 { 0 } else { 0xff_ff_ff })
+            .collect();
+        let whole = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 64.0,
+            h: 64.0,
+        };
+        canvas(&mut pixels, 64).frost(whole, 0.0, 0xff_ff_ff, 0.0);
+        let middle = pixels[32 * 64 + 32] & 0xff;
+        assert!((60..200).contains(&middle), "the edge is smeared: {middle}");
+        canvas(&mut pixels, 64).frost(whole, 0.0, 0xff_00_00, 1.0);
+        assert_eq!(
+            pixels[32 * 64 + 5],
+            0xff_00_00,
+            "a full tint hides what is behind"
+        );
+    }
+
+    #[test]
+    fn colors_mix_by_channel() {
+        assert_eq!(mix(0x00_00_00, 0xff_80_00, 0.5), 0x80_40_00);
+        assert_eq!(mix(0x12_34_56, 0xff_ff_ff, 0.0), 0x12_34_56);
     }
 
     #[test]

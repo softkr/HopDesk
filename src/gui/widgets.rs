@@ -36,14 +36,29 @@ pub fn banner<R>(ui: &mut Ui, fill: Color32, stroke: Color32, add_contents: impl
         .inner
 }
 
-pub fn section_title(ui: &mut Ui, title: &str, help: Option<&str>) {
+/// A card's title after its icon tile, with an optional line of help under the title.
+pub fn section_title(ui: &mut Ui, icon: Icon, color: Color32, title: &str, help: Option<&str>) {
     let pal = palette(ui);
-    ui.label(RichText::new(title).size(TITLE_SIZE).bold().color(pal.text));
-    if let Some(help) = help {
-        ui.label(RichText::new(help).small().color(pal.text_weak));
-    }
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        icon_tile(ui, icon, color, SECTION_TILE);
+        let title = RichText::new(title).size(TITLE_SIZE).bold().color(pal.text);
+        // A title alone sits in the row, centered on the tile; with help, both lines are.
+        let Some(help) = help else {
+            ui.label(title);
+            return;
+        };
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.label(title);
+            ui.label(RichText::new(help).small().color(pal.text_weak));
+        });
+    });
     ui.add_space(4.0);
 }
+
+/// The icon tile beside a section title.
+const SECTION_TILE: f32 = 28.0;
 
 pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
     filled_button(ui, text, palette(ui).accent)
@@ -53,19 +68,29 @@ pub fn danger_button(ui: &mut Ui, text: &str) -> Response {
     filled_button(ui, text, palette(ui).danger)
 }
 
-/// The one call to action of a screen: an ink-colored button (near black in light mode, near white
-/// in dark mode) with its icon, label and, when it has one, the keyboard shortcut as a keycap.
-pub fn hero_button(ui: &mut Ui, icon: Icon, text: &str, shortcut: Option<&str>, width: f32) -> Response {
+/// The one call to action of a screen: an accent-colored button with its icon, label and, when it has one, the keyboard shortcut as a keycap.
+pub fn hero_button(
+    ui: &mut Ui,
+    icon: Icon,
+    text: &str,
+    shortcut: Option<&str>,
+    width: f32,
+) -> Response {
     const HEIGHT: f32 = 46.0;
     const GAP: f32 = 10.0;
     let pal = palette(ui);
-    let (ink, on_ink) = (pal.text, pal.surface);
+    let (ink, on_ink) = (pal.accent, pal.on_accent);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click());
-    let hover = motion::toggle(ui.ctx(), response.id.with("hover"), response.hovered(), motion::FAST);
-    // Toward the mid gray: lighter on the dark ink, darker on the light one.
-    let mut fill = ink.lerp_to_gamma(pal.text_weak, 0.22 * hover);
+    let hover = motion::toggle(
+        ui.ctx(),
+        response.id.with("hover"),
+        response.hovered(),
+        motion::FAST,
+    );
+    // Lighter under the pointer, darker while pressed.
+    let mut fill = ink.lerp_to_gamma(Color32::WHITE, 0.12 * hover);
     if response.is_pointer_button_down_on() {
-        fill = ink.lerp_to_gamma(pal.text_weak, 0.4);
+        fill = ink.lerp_to_gamma(Color32::BLACK, 0.14);
     }
     let painter = ui.painter();
     let radius = CornerRadius::same(FLOAT_RADIUS);
@@ -340,6 +365,20 @@ pub fn icon_badge(ui: &mut Ui, icon: Icon, diameter: f32) {
     paint_icon(ui, icon, rect.center(), (diameter * 0.5).round(), pal.accent);
 }
 
+/// Rounded square in `color` with a white icon, like the tiles in a system settings list.
+pub fn icon_tile(ui: &mut Ui, icon: Icon, color: Color32, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same((size * 0.28).round() as u8), color);
+    paint_icon(
+        ui,
+        icon,
+        rect.center(),
+        (size * 0.58).round(),
+        Color32::WHITE,
+    );
+}
+
 /// Label above a field, optional error below it.
 pub fn field<R>(ui: &mut Ui, label: &str, error: Option<&str>, add_field: impl FnOnce(&mut Ui) -> R) -> R {
     let pal = palette(ui);
@@ -427,8 +466,63 @@ pub fn text_input<'t>(ui: &Ui, value: &'t mut String, hint: &str, width: f32, in
     Input { edit, invalid, icon: None, shortcut: None }
 }
 
+/// An on/off switch.
+pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
+    const SIZE: Vec2 = Vec2::new(40.0, 24.0);
+    let pal = palette(ui);
+    let (rect, mut response) = ui.allocate_exact_size(SIZE, Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let t = motion::toggle(ui.ctx(), response.id.with("on"), *on, motion::FAST);
+    // The system green of switches, in both appearances.
+    let green = if ui.visuals().dark_mode {
+        Color32::from_rgb(0x30, 0xD1, 0x58)
+    } else {
+        Color32::from_rgb(0x34, 0xC7, 0x59)
+    };
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(12),
+        pal.control_border.lerp_to_gamma(green, t),
+    );
+    let knob = egui::Pos2::new(
+        egui::lerp(rect.left() + 12.0..=rect.right() - 12.0, t),
+        rect.center().y,
+    );
+    painter.circle_filled(
+        knob + Vec2::new(0.0, 1.0),
+        10.0,
+        Color32::from_black_alpha(40),
+    );
+    painter.circle_filled(knob, 10.0, Color32::WHITE);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
 /// Two or more mutually exclusive options shown as one segmented control.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> bool {
+    let options: Vec<(T, Option<Icon>, &str)> = options.iter().map(|(option, label)| (*option, None, *label)).collect();
+    segmented_with(ui, value, &options)
+}
+
+/// [`segmented`] with an icon before each label.
+pub fn segmented_icons<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, Icon, &str)]) -> bool {
+    let options: Vec<(T, Option<Icon>, &str)> =
+        options.iter().map(|(option, icon, label)| (*option, Some(*icon), *label)).collect();
+    segmented_with(ui, value, &options)
+}
+
+/// The icon in a segment, beside its label.
+const SEGMENT_ICON: f32 = 14.0;
+/// Space inside a segment beside its label.
+const SEGMENT_PADDING: f32 = 10.0;
+
+fn segmented_with<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, Option<Icon>, &str)]) -> bool {
     let pal = palette(ui);
     let mut changed = false;
     Frame::new()
@@ -438,14 +532,21 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for (option, label) in options {
+                // Compact segments, so the widest row with icons fits the narrowest window.
+                ui.spacing_mut().button_padding.x = SEGMENT_PADDING;
+                for (option, icon, label) in options {
                     let selected = *value == *option;
+                    let color = if selected { pal.text } else { pal.text_weak };
                     let text = if selected {
-                        RichText::new(*label).bold().color(pal.text)
+                        RichText::new(*label).bold().color(color)
                     } else {
-                        RichText::new(*label).color(pal.text_weak)
+                        RichText::new(*label).color(color)
                     };
-                    let mut button = egui::Button::new(text)
+                    let button = match icon {
+                        Some(icon) => egui::Button::image_and_text(icon.image(SEGMENT_ICON, color), text),
+                        None => egui::Button::new(text),
+                    };
+                    let mut button = button
                         .corner_radius(CornerRadius::same(RADIUS - 2))
                         .min_size(Vec2::new(96.0, 28.0));
                     button = if selected {
@@ -505,6 +606,26 @@ pub enum Icon {
     Success,
     Info,
     Alert,
+    /// The AI assistant.
+    Sparkles,
+    /// Acting without asking.
+    Zap,
+    /// A server address.
+    Globe,
+    /// A model.
+    Cpu,
+    /// Kept in the credential store.
+    Lock,
+    /// A user name.
+    User,
+    /// Screen sharing (VNC).
+    ScreenShare,
+    /// Straight to the target, without a jump host or VPN.
+    ArrowRight,
+    /// A private key file.
+    FileKey,
+    /// A shared folder.
+    Folder,
 }
 
 macro_rules! lucide {
@@ -542,6 +663,16 @@ impl Icon {
             Icon::Success => lucide!("circle-check"),
             Icon::Info => lucide!("info"),
             Icon::Alert => lucide!("circle-alert"),
+            Icon::Sparkles => lucide!("sparkles"),
+            Icon::Zap => lucide!("zap"),
+            Icon::Globe => lucide!("globe"),
+            Icon::Cpu => lucide!("cpu"),
+            Icon::Lock => lucide!("lock"),
+            Icon::User => lucide!("user"),
+            Icon::ScreenShare => lucide!("screen-share"),
+            Icon::ArrowRight => lucide!("arrow-right"),
+            Icon::FileKey => lucide!("file-key"),
+            Icon::Folder => lucide!("folder"),
         }
     }
 
@@ -574,4 +705,30 @@ pub fn paint_icon_scaled(ui: &Ui, icon: Icon, center: egui::Pos2, size: f32, sca
 /// Standard button with a leading icon, both in `color`.
 pub fn labeled_button(icon: Icon, text: impl Into<RichText>, color: Color32) -> egui::Button<'static> {
     egui::Button::image_and_text(icon.image(ICON_SM, color), text.into().color(color))
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::{Harness, kittest::Queryable as _};
+
+    use super::{Icon, segmented_icons};
+
+    #[test]
+    fn a_segment_with_an_icon_is_picked_by_its_label() {
+        // The app's fonts and image loaders, as the screenshots set them up.
+        let mut harness = Harness::builder()
+            .with_context_setup(|ctx| {
+                ctx.add_font_provider(std::sync::Arc::new(egui_system_font_provider::SystemFontProvider::new()));
+                crate::gui::theme::apply(ctx);
+            })
+            .build_ui_state(
+                |ui, value: &mut u8| {
+                    segmented_icons(ui, value, &[(1, Icon::Monitor, "RDP"), (2, Icon::Terminal, "SSH")]);
+                },
+                1,
+            );
+        harness.get_by_label("SSH").click();
+        harness.run();
+        assert_eq!(*harness.state(), 2);
+    }
 }

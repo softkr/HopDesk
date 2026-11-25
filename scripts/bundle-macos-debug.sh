@@ -44,6 +44,8 @@ LOG="$LOGDIR/debug-$(date +%Y%m%d-%H%M%S).log"
 ln -sfn "$LOG" "$LOGDIR/latest.log"
 export RUST_LOG="${RUST_LOG:-debug,russh=warn}"
 export HOPDESK_LOG_DIR="$LOGDIR"
+# The debug app must not update itself into the released one.
+export HOPDESK_NO_UPDATE=1
 echo "HopDesk debug run $(date)" >> "$LOG"
 exec "$DIR/hopdesk-bin" >>"$LOG" 2>&1
 WRAPPER

@@ -123,6 +123,24 @@ fn screenshots() {
     let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(profiles.clone()), sessions.clone()), false);
     shot(&mut h, "05-connected");
 
+    // AI settings: a provider's API, and a server of one's own (dark)
+    for (name, server, dark) in [
+        ("18-ai-settings", false, false),
+        ("19-ai-settings-server-dark", true, true),
+    ] {
+        let store = ProfileStore::from_profiles(profiles.clone());
+        let form = super::ai_settings::AiForm::for_screenshot(&store, server);
+        let mut h = harness(Launcher::with_store(store, sessions.clone()), dark);
+        h.state_mut().ai_form = Some(form);
+        shot(&mut h, name);
+    }
+    // AI off (자동 실행 greyed out), and deleting the key asks first
+    let store = ProfileStore::from_profiles(profiles.clone());
+    let form = super::ai_settings::AiForm::for_screenshot(&store, false).off_and_confirming_delete();
+    let mut h = harness(Launcher::with_store(store, sessions.clone()), false);
+    h.state_mut().ai_form = Some(form);
+    shot(&mut h, "20-ai-settings-off-confirm");
+
     // 6. New connection form after a save attempt with missing fields
     let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(profiles.clone()), Sessions::default()), false);
     h.state_mut().apply_nav(Nav::New);
@@ -130,11 +148,16 @@ fn screenshots() {
     let ctx = h.ctx.clone();
     h.state_mut().save(&ctx);
     shot(&mut h, "06-new-errors");
+    h.set_size(egui::Vec2::new(760.0, 520.0));
+    shot(&mut h, "06b-new-narrow");
 
     // 7. Edit existing (dark)
     let mut h = harness(Launcher::with_store(ProfileStore::from_profiles(profiles), Sessions::default()), true);
     h.state_mut().apply_nav(Nav::Edit(ids[0]));
     shot(&mut h, "07-edit-dark");
+    // At the narrowest window, the widest choice row (with its icons) still fits.
+    h.set_size(egui::Vec2::new(760.0, 520.0));
+    shot(&mut h, "07b-edit-narrow-dark");
 
     // 8. Direct connection (no jump host): detail while connecting, then the edit form
     let mut direct = profile("집 PC", "", "pc.example.com", "hong", false);
