@@ -199,12 +199,42 @@ pub struct ProfileStore {
     /// home directory. Received files land here and the session shares it as a drive.
     #[serde(default)]
     shared_folder: Option<PathBuf>,
+    /// The AI assistant in RDP sessions; its API key is in the OS credential store.
+    #[serde(default)]
+    ai: AiSettings,
+}
+
+/// The AI assistant: off until the user turns it on (the remote screen goes to the AI provider).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Model ID at the provider.
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_ai_model(),
+        }
+    }
+}
+
+fn default_ai_model() -> String {
+    crate::agent::provider::claude::DEFAULT_MODEL.to_owned()
 }
 
 impl ProfileStore {
     #[cfg(test)]
     pub fn from_profiles(profiles: Vec<Profile>) -> Self {
-        Self { profiles, shared_folder: None }
+        Self {
+            profiles,
+            shared_folder: None,
+            ai: AiSettings::default(),
+        }
     }
 
     fn path() -> anyhow::Result<PathBuf> {
@@ -234,6 +264,16 @@ impl ProfileStore {
     /// Sets (or, with `None`, clears) the shared folder location and saves the store.
     pub fn set_shared_folder(&mut self, folder: Option<PathBuf>) -> anyhow::Result<()> {
         self.shared_folder = folder;
+        self.save()
+    }
+
+    pub fn ai(&self) -> &AiSettings {
+        &self.ai
+    }
+
+    /// Replaces the AI assistant settings and saves the store.
+    pub fn set_ai(&mut self, ai: AiSettings) -> anyhow::Result<()> {
+        self.ai = ai;
         self.save()
     }
 

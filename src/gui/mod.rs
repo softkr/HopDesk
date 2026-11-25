@@ -3,10 +3,11 @@
 //! Each connection runs as a child process (`hopdesk connect <name>`): the session window (RDP
 //! viewer or SSH terminal) owns its own winit event loop, and winit allows only one per process.
 
+mod ai_settings;
 mod detail;
 mod form;
 mod motion;
-mod platform;
+pub(crate) mod platform;
 mod sessions;
 pub(crate) mod theme;
 #[cfg(any(target_os = "macos", windows))]
@@ -181,6 +182,8 @@ pub struct Launcher {
     view: View,
     search: String,
     dialog: Option<Dialog>,
+    /// The AI settings window, while open.
+    ai_form: Option<ai_settings::AiForm>,
     toasts: Vec<Toast>,
     next_toast: u64,
     sessions: Sessions,
@@ -219,6 +222,7 @@ impl Launcher {
             view: View::Detail,
             search: String::new(),
             dialog: None,
+            ai_form: None,
             toasts: Vec::new(),
             next_toast: 0,
             sessions,
@@ -500,6 +504,7 @@ impl Launcher {
             });
 
         self.dialogs(&ctx);
+        self.ai_settings(&ctx);
         self.draw_toasts(&ctx);
     }
 
@@ -568,6 +573,12 @@ impl Launcher {
                     .clicked()
                 {
                     self.navigate(Nav::New);
+                }
+                if widgets::quiet_button(ui, widgets::Icon::Settings, "AI", 30.0)
+                    .on_hover_text("AI 공동 작업자 설정")
+                    .clicked()
+                {
+                    self.ai_form = Some(ai_settings::AiForm::open(&self.store));
                 }
             });
         });
@@ -818,6 +829,18 @@ impl Launcher {
             }
         } else if cancelled {
             self.dialog = None;
+        }
+    }
+
+    fn ai_settings(&mut self, ctx: &egui::Context) {
+        let Some(form) = &mut self.ai_form else { return };
+        match form.ui(ctx, &mut self.store) {
+            ai_settings::Outcome::Open => {}
+            ai_settings::Outcome::Cancelled => self.ai_form = None,
+            ai_settings::Outcome::Saved(text) => {
+                self.ai_form = None;
+                self.toast(ctx, ToastKind::Success, text);
+            }
         }
     }
 

@@ -11,11 +11,13 @@
 //! hopdesk set-password <name> --jump | --target
 //! hopdesk remove <name>
 //! hopdesk forget <host>
+//! hopdesk set-ai-key [--remove]
 //! ```
 
 // Windows: no console window when the launcher is double-clicked (see `attach_parent_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod agent;
 #[cfg(target_os = "macos")]
 mod clipboard;
 #[cfg(target_os = "macos")]
@@ -86,6 +88,12 @@ enum Command {
     },
     /// Forget pinned SSH host keys / RDP certificates of a host.
     Forget { host: String },
+    /// Store the Anthropic API key for the AI assistant in RDP sessions in the OS credential store.
+    SetAiKey {
+        /// Delete the stored key instead; sessions then run without the assistant.
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 #[derive(Args)]
@@ -128,6 +136,8 @@ struct AddArgs {
 fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
+    // One TLS crypto provider for the whole process: IronRDP's TLS and the AI client's HTTPS.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -153,7 +163,24 @@ fn main() -> anyhow::Result<()> {
             println!("removed {removed} pinned entr{} for `{host}`", if removed == 1 { "y" } else { "ies" });
             Ok(())
         }
+        Command::SetAiKey { remove } => set_ai_key(remove),
     }
+}
+
+fn set_ai_key(remove: bool) -> anyhow::Result<()> {
+    if remove {
+        secret_store::delete(&[agent::API_KEY_ACCOUNT.to_owned()])?;
+        println!("AI API key removed; sessions run without the assistant");
+        return Ok(());
+    }
+    let key = rpassword::prompt_password("Anthropic API key: ")?;
+    let key = key.trim();
+    if key.is_empty() {
+        bail!("API key must not be empty");
+    }
+    secret_store::set(agent::API_KEY_ACCOUNT, key)?;
+    println!("AI API key stored; turn the assistant on in HopDesk's AI settings");
+    Ok(())
 }
 
 fn add(args: AddArgs) -> anyhow::Result<()> {

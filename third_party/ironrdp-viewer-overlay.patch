@@ -1,0 +1,77 @@
+diff --git a/crates/ironrdp-viewer/src/app.rs b/crates/ironrdp-viewer/src/app.rs
+index 54395fd..e3e9bae 100644
+--- a/crates/ironrdp-viewer/src/app.rs
++++ b/crates/ironrdp-viewer/src/app.rs
+@@ -109,6 +109,8 @@ pub struct RpcApp {
+     pending_paste: Option<(DropPaste, Instant)>,
+     /// [PATCH HopDesk] Modifier state for the local fullscreen shortcut.
+     modifiers: winit::keyboard::ModifiersState,
++    /// [PATCH HopDesk] Draws over each presented frame; see [`App::with_overlay`].
++    overlay: Option<OverlayPainter>,
+ }
+ 
+ impl App {
+@@ -158,10 +160,31 @@ impl App {
+         self
+     }
+ 
++    /// [PATCH HopDesk] Draws over each frame after it is scaled to the window, before it is
++    /// presented. The overlay is local only: it never reaches the session.
++    #[must_use]
++    pub fn with_overlay(mut self, painter: OverlayPainter) -> Self {
++        self.inner.overlay = Some(painter);
++        self
++    }
++
++    /// [PATCH HopDesk] The latest session frame (`0x00RRGGBB` pixels) and its size, once one arrived.
++    pub fn frame(&self) -> Option<(&[u32], (u16, u16))> {
++        let (width, height) = self.inner.buffer_size;
++        let complete = usize::from(width) * usize::from(height) == self.inner.buffer.len();
++        (complete && !self.inner.buffer.is_empty()).then(|| (self.inner.buffer.as_slice(), self.inner.buffer_size))
++    }
++
++    /// [PATCH HopDesk] The desktop window, once it is open.
++    pub fn window(&self) -> Option<&Arc<Window>> {
++        self.inner.window.as_ref().map(|(window, _)| window)
++    }
++
+     /// Creates the viewer; with `remote_app`, each RemoteApp window opens as a local window
+     /// instead of a desktop window.
+-    pub fn new(
+-        event_loop: &EventLoop<RdpOutputEvent>,
++    /// [PATCH HopDesk] The event loop may carry the embedder's own events alongside the output events.
++    pub fn new<T: 'static>(
++        event_loop: &EventLoop<T>,
+         input_event_sender: &RdpInputSender,
+         initial_window_size: PhysicalSize<u32>,
+         remote_app: bool,
+@@ -242,6 +265,7 @@ impl RpcApp {
+             pending_drop: Vec::new(),
+             pending_paste: None,
+             modifiers: winit::keyboard::ModifiersState::empty(),
++            overlay: None,
+         })
+     }
+ 
+@@ -502,6 +526,10 @@ impl RpcApp {
+         } else {
+             scale_nearest(&self.buffer, source_width, source_height, &mut sb_buffer, target_width, target_height);
+         }
++        // [PATCH HopDesk] Local drawing over the session, e.g. an assistant.
++        if let Some(overlay) = &mut self.overlay {
++            overlay(&mut sb_buffer, target_width, target_height);
++        }
+         sb_buffer.present().expect("buffer present");
+     }
+     fn on_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+@@ -1144,6 +1172,10 @@ pub struct DropPaste {
+     pub ready: Arc<AtomicBool>,
+ }
+ 
++/// [PATCH HopDesk] Draws over a frame of `width` x `height` `0x00RRGGBB` pixels, the window's
++/// client area in physical pixels.
++pub type OverlayPainter = Box<dyn FnMut(&mut [u32], usize, usize)>;
++
+ /// [PATCH HopDesk] How long a drop waits for the session clipboard before the paste is dropped.
+ const DROP_PASTE_TIMEOUT: Duration = Duration::from_secs(10);
+ /// [PATCH HopDesk] How often a pending paste checks whether the clipboard is ready.

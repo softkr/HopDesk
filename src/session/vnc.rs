@@ -14,9 +14,12 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use vnc::{ClientKeyEvent, ClientMouseEvent, PixelFormat, VncClient, VncConnector, VncEncoding, VncError, VncEvent, X11Event};
 
+use crate::agent::capture::Pixels;
 use crate::profile::Profile;
 use crate::status::{self, Phase};
 use crate::tunnel::Tunnel;
+
+mod agent_input;
 
 /// How often the window asks the server for screen changes.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(33);
@@ -208,6 +211,16 @@ impl Screen {
             _ => return false,
         }
         true
+    }
+
+    /// A copy of the whole screen for an AI screenshot.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by the agent loop"))]
+    fn snapshot(&self) -> Pixels {
+        Pixels {
+            width: u32::try_from(self.width).unwrap_or(0),
+            height: u32::try_from(self.height).unwrap_or(0),
+            rgba: self.pixels.clone(),
+        }
     }
 
     fn resize(&mut self, width: usize, height: usize) {
@@ -629,6 +642,16 @@ mod tests {
         assert_eq!(pixel(&screen, 1, 1), [10, 20, 30, 255]);
         assert_eq!(pixel(&screen, 2, 1), [40, 50, 60, 255]);
         assert_eq!(pixel(&screen, 0, 1), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_snapshot_is_the_whole_screen() {
+        let mut screen = Screen::default();
+        screen.resize(2, 1);
+        screen.put(rect(0, 0, 2, 1), &[1, 2, 3, 0, 4, 5, 6, 0]);
+        let snapshot = screen.snapshot();
+        assert_eq!((snapshot.width, snapshot.height), (2, 1));
+        assert_eq!(snapshot.rgba, [1, 2, 3, 255, 4, 5, 6, 255]);
     }
 
     #[test]

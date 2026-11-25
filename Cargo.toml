@@ -52,6 +52,18 @@ eframe = "0.37"
 egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
 rfd = "0.18"
 
+# AI co-worker: screenshots for the model (already in the tree through eframe), the model's API
+# (system root certificates, so TLS-inspecting company proxies work), AI input for RDP sessions,
+# and text in the session overlay (already in the tree through egui).
+# reqwest brings no crypto provider: with a second one next to IronRDP's aws-lc-rs, rustls cannot
+# pick a process default and every RDP connection panics.
+image = { version = "0.25", default-features = false, features = ["png"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots-no-provider", "http2", "system-proxy", "json"] }
+# The process-wide crypto provider reqwest needs installed (aws-lc-rs, as IronRDP's TLS uses)
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+ironrdp-input = { path = "third_party/IronRDP/crates/ironrdp-input" }
+ab_glyph = "0.2"
+
 # Session Dock icon and badge, reopening the launcher from the Dock, clipboard bridge (the engine has no macOS clipboard backend), Reduce Motion setting
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -73,5 +85,7 @@ winresource = "0.1"
 tray-icon = "0.26"
 
 [dev-dependencies]
+# Paused time in the agent loop tests
+tokio = { version = "1", features = ["test-util"] }
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
 egui_system_font_provider = "0.37"

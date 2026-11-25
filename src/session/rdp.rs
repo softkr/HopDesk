@@ -23,6 +23,19 @@ use crate::status::{self, Phase};
 use crate::trust::{Kind, TrustStore, Verdict, sha256_hex};
 use crate::tunnel::Tunnel;
 
+mod agent_input;
+mod assistant;
+mod canvas;
+mod overlay;
+
+/// Events of the session window: the RDP client's output, and the AI assistant's.
+enum SessionEvent {
+    Rdp(RdpOutputEvent),
+    Agent(crate::agent::Event),
+    /// The assistant asks for the current screen.
+    Snapshot(tokio::sync::oneshot::Sender<anyhow::Result<crate::agent::capture::Pixels>>),
+}
+
 /// `screen` is the client screen size in logical points: fullscreen and maximized sessions start
 /// at that size, so the server does not have to resize right after logon.
 /// Without `tunnel` the session connects straight to the RDP target.
@@ -53,7 +66,7 @@ pub fn run(
     info!(width = desktop.0, height = desktop.1, mode = ?profile.display, "Requested session size");
     let config = build_config(profile, desktop, rdp_password, tunnel, trust)?;
 
-    let event_loop = EventLoop::<RdpOutputEvent>::with_user_event().build()?;
+    let event_loop = EventLoop::<SessionEvent>::with_user_event().build()?;
     let event_loop_proxy = event_loop.create_proxy();
     let (output_event_sender, mut output_event_receiver) = output_channel(64);
     let initial_window_size = PhysicalSize::new(u32::from(desktop.0), u32::from(desktop.1));
@@ -91,6 +104,7 @@ pub fn run(
         (client.with_cliprdr_backend_factory(Box::new(factory)), files)
     };
     let input_event_sender = client.input_sender();
+    let assistant = assistant::start(rt.handle(), event_loop.create_proxy(), client.input_sender());
     // Maximized and fullscreen windows connect at the profile resolution; the viewer then asks
     // the server to match the window size in points. A fixed session keeps the profile
     // resolution and is scaled to the window.
@@ -110,11 +124,15 @@ pub fn run(
         #[cfg(target_os = "macos")]
         Some(clipboard_files),
     ));
+    let (app, assistant) = match assistant {
+        Some((assistant, painter)) => (app.with_overlay(painter), Some(assistant)),
+        None => (app, None),
+    };
 
     let output_forwarder = rt.spawn(async move {
         while let Some(event) = output_event_receiver.recv().await {
             report_progress(&event);
-            if event_loop_proxy.send_event(event).is_err() {
+            if event_loop_proxy.send_event(SessionEvent::Rdp(event)).is_err() {
                 break;
             }
         }
@@ -127,29 +145,32 @@ pub fn run(
         }
     });
 
-    event_loop.run_app(&mut SessionWindow::new(app, &profile.name))?;
+    event_loop.run_app(&mut SessionWindow::new(app, &profile.name, assistant))?;
     Ok(())
 }
 
-/// The viewer, plus a Dock tile that tells the session apart from the launcher (macOS).
+/// The viewer, plus a Dock tile that tells the session apart from the launcher (macOS), and the
+/// AI assistant when one is set up.
 struct SessionWindow {
     app: App,
     #[cfg_attr(not(target_os = "macos"), expect(dead_code, reason = "used for the macOS Dock tile"))]
     profile_name: String,
     dock_marked: bool,
+    assistant: Option<assistant::Assistant>,
 }
 
 impl SessionWindow {
-    fn new(app: App, profile_name: &str) -> Self {
+    fn new(app: App, profile_name: &str, assistant: Option<assistant::Assistant>) -> Self {
         Self {
             app,
             profile_name: profile_name.to_owned(),
             dock_marked: false,
+            assistant,
         }
     }
 }
 
-impl ApplicationHandler<RdpOutputEvent> for SessionWindow {
+impl ApplicationHandler<SessionEvent> for SessionWindow {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // The app has finished launching here, so the Dock tile is no longer reset to the bundle icon.
         if !self.dock_marked {
@@ -161,11 +182,31 @@ impl ApplicationHandler<RdpOutputEvent> for SessionWindow {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        if let Some(assistant) = &mut self.assistant
+            && assistant.window_event(&self.app, &event)
+        {
+            return;
+        }
         self.app.window_event(event_loop, window_id, event);
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RdpOutputEvent) {
-        self.app.user_event(event_loop, event);
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
+        match event {
+            SessionEvent::Rdp(event) => {
+                self.app.user_event(event_loop, event);
+                if let Some(assistant) = &self.assistant {
+                    assistant.after_output(&self.app);
+                }
+            }
+            SessionEvent::Agent(event) => {
+                if let Some(assistant) = &self.assistant {
+                    assistant.agent_event(&self.app, event);
+                }
+            }
+            SessionEvent::Snapshot(reply) => {
+                let _ = reply.send(assistant::snapshot(&self.app));
+            }
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {

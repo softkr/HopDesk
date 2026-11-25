@@ -43,6 +43,16 @@ toggles fullscreen.
 
 Search for `[PATCH HopDesk]` to find the changed code.
 
+### Local patch: `ironrdp-viewer-overlay.patch`
+
+Applies on top of `ironrdp-viewer-window-mode.patch`. Adds `App::with_overlay`: a painter that
+draws over each frame after it is scaled to the window and before it is presented, so the
+embedder can show local UI (the AI assistant) over the session in windowed and fullscreen mode
+alike; the session never sees it. `App::frame` returns the latest session frame (for the
+assistant's screenshots) and `App::window` the desktop window (redraws, input method).
+`App::new` takes an event loop of any user event type, so the embedder can carry its own events
+alongside the client's output.
+
 ### Local patch: `ironrdp-toolchain-warnings.patch`
 
 Silences three warnings newer Rust compilers raise in the IronRDP sources while keeping them
@@ -60,6 +70,7 @@ rm -rf third_party/IronRDP/.git
 (cd third_party/IronRDP && patch -p1 < ../ironrdp-custom-transport.patch)
 (cd third_party/IronRDP && patch -p1 < ../ironrdp-client-resize-no-reconnect.patch)
 (cd third_party/IronRDP && patch -p1 < ../ironrdp-viewer-window-mode.patch)
+(cd third_party/IronRDP && patch -p1 < ../ironrdp-viewer-overlay.patch)
 (cd third_party/IronRDP && patch -p1 < ../ironrdp-toolchain-warnings.patch)
 ```
 
