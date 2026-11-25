@@ -43,6 +43,14 @@ toggles fullscreen.
 
 Search for `[PATCH HopDesk]` to find the changed code.
 
+### Local patch: `ironrdp-toolchain-warnings.patch`
+
+Silences three warnings newer Rust compilers raise in the IronRDP sources while keeping them
+building on the minimum supported Rust (1.95): two `#[expect(single_use_lifetimes)]` that newer
+compilers no longer fulfil become `#[allow]`, and the deprecated `AtomicUsize::fetch_update`
+stays (its replacement `try_update` is newer than 1.95) with the deprecation allowed. Drop the
+patch once upstream changes these lines.
+
 ### Updating IronRDP
 
 ```sh
@@ -52,6 +60,7 @@ rm -rf third_party/IronRDP/.git
 (cd third_party/IronRDP && patch -p1 < ../ironrdp-custom-transport.patch)
 (cd third_party/IronRDP && patch -p1 < ../ironrdp-client-resize-no-reconnect.patch)
 (cd third_party/IronRDP && patch -p1 < ../ironrdp-viewer-window-mode.patch)
+(cd third_party/IronRDP && patch -p1 < ../ironrdp-toolchain-warnings.patch)
 ```
 
 Consider proposing the custom transport upstream so the patch can be dropped.

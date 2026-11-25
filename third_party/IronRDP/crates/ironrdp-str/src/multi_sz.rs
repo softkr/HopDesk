@@ -165,7 +165,8 @@ impl MultiSzString {
     /// [`MultiSzSegmentError::EmbeddedNul`] if any decoded segment contains a `0x0000`
     /// code unit. An embedded null would split the segment into multiple segments on iteration,
     /// breaking the API contract of one byte slice per string.
-    #[expect(
+    // [PATCH HopDesk] `allow`: newer compilers no longer raise the lint here, older ones still do.
+    #[allow(
         single_use_lifetimes,
         reason = "`'a` is required here because anonymous lifetimes in `impl Trait` are unstable; rustc incorrectly suggests eliding it"
     )]

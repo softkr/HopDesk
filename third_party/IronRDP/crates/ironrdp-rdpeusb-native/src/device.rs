@@ -382,6 +382,9 @@ impl TransferBudget {
     }
 
     pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Option<Reservation> {
+        // [PATCH HopDesk] `fetch_update` is deprecated for `try_update` in newer Rust, which the
+        // minimum supported Rust (1.95) lacks.
+        #[allow(deprecated)]
         self.available
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |available| {
                 available.checked_sub(bytes)

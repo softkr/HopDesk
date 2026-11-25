@@ -1,0 +1,42 @@
+diff --git a/crates/ironrdp-connector/src/connection.rs b/crates/ironrdp-connector/src/connection.rs
+index f222211..753e544 100644
+--- a/crates/ironrdp-connector/src/connection.rs
++++ b/crates/ironrdp-connector/src/connection.rs
+@@ -2115,7 +2115,8 @@ pub fn encode_send_data_request<T: Encode>(
+     Ok(written)
+ }
+ 
+-#[expect(single_use_lifetimes)] // anonymous lifetimes in `impl Trait` are unstable
++// [PATCH HopDesk] `allow`: newer compilers no longer raise the lint here, older ones still do.
++#[allow(single_use_lifetimes)] // anonymous lifetimes in `impl Trait` are unstable
+ fn create_gcc_blocks<'a>(
+     config: &Config,
+     cluster_data: Option<&gcc::ClientClusterData>,
+diff --git a/crates/ironrdp-rdpeusb-native/src/device.rs b/crates/ironrdp-rdpeusb-native/src/device.rs
+index 2b6406e..1cbae53 100644
+--- a/crates/ironrdp-rdpeusb-native/src/device.rs
++++ b/crates/ironrdp-rdpeusb-native/src/device.rs
+@@ -382,6 +382,9 @@ impl TransferBudget {
+     }
+ 
+     pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Option<Reservation> {
++        // [PATCH HopDesk] `fetch_update` is deprecated for `try_update` in newer Rust, which the
++        // minimum supported Rust (1.95) lacks.
++        #[allow(deprecated)]
+         self.available
+             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |available| {
+                 available.checked_sub(bytes)
+diff --git a/crates/ironrdp-str/src/multi_sz.rs b/crates/ironrdp-str/src/multi_sz.rs
+index f81e6d4..4cf2d8c 100644
+--- a/crates/ironrdp-str/src/multi_sz.rs
++++ b/crates/ironrdp-str/src/multi_sz.rs
+@@ -165,7 +165,8 @@ impl MultiSzString {
+     /// [`MultiSzSegmentError::EmbeddedNul`] if any decoded segment contains a `0x0000`
+     /// code unit. An embedded null would split the segment into multiple segments on iteration,
+     /// breaking the API contract of one byte slice per string.
+-    #[expect(
++    // [PATCH HopDesk] `allow`: newer compilers no longer raise the lint here, older ones still do.
++    #[allow(
+         single_use_lifetimes,
+         reason = "`'a` is required here because anonymous lifetimes in `impl Trait` are unstable; rustc incorrectly suggests eliding it"
+     )]
