@@ -42,16 +42,25 @@ const MAX_MESSAGES: usize = 30;
 /// seconds.
 const GLIDE: f32 = 0.22;
 const RIPPLE: f32 = 0.45;
-/// The AI's pointer: an arrow with its tip at the origin, in points.
+/// The AI's pointer: the spine of an arrow in points, which is drawn grown by `ARROW_ROUND`
+/// (rounding its corners) inside a white edge `ARROW_EDGE` wide.
 const ARROW: [(f32, f32); 7] = [
     (0.0, 0.0),
-    (0.0, 16.0),
-    (4.0, 12.3),
-    (6.8, 18.3),
-    (9.3, 17.2),
-    (6.6, 11.4),
-    (11.8, 11.4),
+    (0.0, 12.2),
+    (3.1, 9.4),
+    (5.2, 14.0),
+    (7.1, 13.2),
+    (5.1, 8.7),
+    (9.0, 8.7),
 ];
+const ARROW_ROUND: f32 = 0.6;
+const ARROW_EDGE: f32 = 1.1;
+/// From the spot pointed at to the spine's first corner, so that the tip of the white edge is
+/// on the spot: the edge's reach along the tip's bisector.
+const ARROW_TIP: (f32, f32) = (
+    (ARROW_ROUND + ARROW_EDGE) * 0.39,
+    (ARROW_ROUND + ARROW_EDGE) * 0.92,
+);
 
 const WHITE: Color = 0xff_ff_ff;
 const BLACK: Color = 0x00_00_00;
@@ -1020,19 +1029,26 @@ impl Overlay {
         let color = state_color(State::Acting);
         if let Some(ripple) = ripple {
             let eased = 1.0 - (1.0 - ripple).powi(2);
-            canvas.ring(x, y, (4.0 + 18.0 * eased) * s, 2.5 * s, color, 0.85 * (1.0 - ripple));
+            canvas.circle(x, y, (4.0 + 20.0 * eased) * s, color, 0.22 * (1.0 - ripple));
+            canvas.ring(x, y, (4.0 + 20.0 * eased) * s, 2.0 * s, color, 0.9 * (1.0 - ripple));
         }
-        let arrow = |dx: f32, dy: f32| ARROW.map(|(ax, ay)| (x + (ax + dx) * s, y + (ay + dy) * s));
-        canvas.polygon(&arrow(0.6, 1.4), 1.8 * s, BLACK, 0.25);
-        canvas.polygon(&arrow(0.0, 0.0), 1.5 * s, WHITE, 1.0);
-        canvas.polygon(&arrow(0.0, 0.0), 0.0, color, 1.0);
+        let arrow = |dx: f32, dy: f32| {
+            ARROW.map(|(ax, ay)| (x + (ax + ARROW_TIP.0 + dx) * s, y + (ay + ARROW_TIP.1 + dy) * s))
+        };
+        // A soft shadow a little below: faint layers, each wider than the last.
+        for layer in 0..6u8 {
+            let grow = ARROW_ROUND + ARROW_EDGE + 0.3 + f32::from(layer) * 0.6;
+            canvas.polygon(&arrow(0.3, 1.3), grow * s, BLACK, 0.045);
+        }
+        canvas.polygon(&arrow(0.0, 0.0), (ARROW_ROUND + ARROW_EDGE) * s, WHITE, 1.0);
+        canvas.polygon(&arrow(0.0, 0.0), ARROW_ROUND * s, color, 1.0);
         let Some(text) = &self.text else { return };
-        let size = 10.0 * s;
+        let size = 8.0 * s;
         let tag = Rect {
-            x: x + 12.0 * s,
-            y: y + 16.0 * s,
-            w: text.width("AI", size) + 10.0 * s,
-            h: 16.0 * s,
+            x: x + 10.0 * s,
+            y: y + 13.0 * s,
+            w: text.width("AI", size) + 8.0 * s,
+            h: 12.0 * s,
         };
         let edge = Rect {
             x: tag.x - 1.0 * s,
@@ -1040,9 +1056,14 @@ impl Overlay {
             w: tag.w + 2.0 * s,
             h: tag.h + 2.0 * s,
         };
+        let below = Rect {
+            y: edge.y + 1.0 * s,
+            ..edge
+        };
+        canvas.soft_shadow(below, below.h / 2.0, 0.6 * s, 6, 0.045);
         canvas.round_rect(edge, edge.h / 2.0, WHITE, 1.0);
         canvas.round_rect(tag, tag.h / 2.0, color, 1.0);
-        text.draw(canvas, tag.x + 5.0 * s, tag.y + (tag.h - text.line_height(size)) / 2.0, "AI", size, WHITE);
+        text.draw(canvas, tag.x + 4.0 * s, tag.y + (tag.h - text.line_height(size)) / 2.0, "AI", size, WHITE);
     }
 
     /// "AI 조작 중" in a dark glass capsule at the top of the window, with a stop button.
