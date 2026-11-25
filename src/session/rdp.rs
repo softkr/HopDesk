@@ -196,8 +196,12 @@ impl ApplicationHandler<SessionEvent> for SessionWindow {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
         match event {
             SessionEvent::Rdp(event) => {
+                let image = matches!(event, RdpOutputEvent::Image { .. });
                 self.app.user_event(event_loop, event);
                 if let Some(assistant) = &self.assistant {
+                    if image {
+                        assistant.frame_arrived();
+                    }
                     assistant.after_output(&self.app);
                 }
             }

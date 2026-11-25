@@ -273,6 +273,61 @@ impl Canvas<'_> {
         self.shape(bounds, color, alpha, |px, py| ((px - cx).hypot(py - cy) - radius).abs() - width / 2.0);
     }
 
+    /// A soft black shadow around `rect`: `layers` faint rounded rectangles, each `step` pixels
+    /// wider than the last, as if drawn one over another, but in one pass over the pixels.
+    pub fn soft_shadow(&mut self, rect: Rect, radius: f32, step: f32, layers: u8, alpha: f32) {
+        let spread = f32::from(layers) * step;
+        // Where every layer covers the pixel fully (well inside), the shade is the same.
+        let covered = (1.0 - alpha).powi(i32::from(layers));
+        #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
+        let (left, top, right, bottom) = (
+            (rect.x - spread).floor() as i32 - 1,
+            (rect.y - spread).floor() as i32 - 1,
+            (rect.x + rect.w + spread).ceil() as i32 + 1,
+            (rect.y + rect.h + spread).ceil() as i32 + 1,
+        );
+        for y in top.max(0)..bottom {
+            for x in left.max(0)..right {
+                #[expect(clippy::cast_precision_loss, reason = "screen coordinates")]
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                // A rounded rectangle grown by `grow` (its radius too) lies `grow` further out, so
+                // one distance serves every layer. What shows through all of them:
+                let distance = rounded_distance(rect, radius, px, py);
+                if distance >= spread + 0.5 {
+                    continue;
+                }
+                let through = if distance <= step - 0.5 {
+                    covered
+                } else {
+                    (1..=layers).fold(1.0, |through, layer| {
+                        let coverage = (0.5 - (distance - f32::from(layer) * step)).clamp(0.0, 1.0);
+                        through * (1.0 - alpha * coverage)
+                    })
+                };
+                self.blend(x, y, 0, 1.0 - through);
+            }
+        }
+    }
+
+    /// A polygon through `points`, grown by `grow` pixels on every side (for an outline drawn
+    /// under it).
+    pub fn polygon(&mut self, points: &[(f32, f32)], grow: f32, color: Color, alpha: f32) {
+        if points.len() < 3 {
+            return;
+        }
+        let (mut left, mut top, mut right, mut bottom) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for (x, y) in points {
+            (left, top, right, bottom) = (left.min(*x), top.min(*y), right.max(*x), bottom.max(*y));
+        }
+        let bounds = Rect {
+            x: left - grow,
+            y: top - grow,
+            w: right - left + 2.0 * grow,
+            h: bottom - top + 2.0 * grow,
+        };
+        self.shape(bounds, color, alpha, |px, py| polygon_distance(points, px, py) - grow);
+    }
+
     /// Fills where `distance` (negative inside) is below zero, with a one-pixel soft edge.
     fn shape(&mut self, bounds: Rect, color: Color, alpha: f32, distance: impl Fn(f32, f32) -> f32) {
         #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
@@ -302,6 +357,25 @@ fn rounded_distance(rect: Rect, radius: f32, px: f32, py: f32) -> f32 {
     let dx = (px - (rect.x + rect.w / 2.0)).abs() - (rect.w / 2.0 - radius);
     let dy = (py - (rect.y + rect.h / 2.0)).abs() - (rect.h / 2.0 - radius);
     dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
+}
+
+/// Distance from a point to a polygon's edge, negative inside (even-odd rule).
+fn polygon_distance(points: &[(f32, f32)], px: f32, py: f32) -> f32 {
+    let mut distance = f32::MAX;
+    let mut inside = false;
+    let mut previous = points[points.len() - 1];
+    for &(bx, by) in points {
+        let (ax, ay) = previous;
+        let (ex, ey) = (bx - ax, by - ay);
+        let (wx, wy) = (px - ax, py - ay);
+        let t = ((wx * ex + wy * ey) / (ex * ex + ey * ey).max(f32::EPSILON)).clamp(0.0, 1.0);
+        distance = distance.min((wx - ex * t).hypot(wy - ey * t));
+        if (ay > py) != (by > py) && px < ax + (py - ay) * ex / ey {
+            inside = !inside;
+        }
+        previous = (bx, by);
+    }
+    if inside { -distance } else { distance }
 }
 
 /// The color `t` of the way from `a` to `b`.
@@ -443,6 +517,32 @@ mod tests {
             0xff_00_00,
             "a full tint hides what is behind"
         );
+    }
+
+    #[test]
+    fn a_soft_shadow_looks_like_its_layers_drawn_one_by_one() {
+        let rect = Rect { x: 20.0, y: 15.0, w: 50.0, h: 30.0 };
+        let (radius, step, layers, alpha) = (8.0, 1.5, 10u8, 0.04);
+        let mut layered = vec![0xc0_d0_e0u32; 100 * 70];
+        {
+            let mut layered = Canvas { pixels: &mut layered, width: 100, height: 70 };
+            for layer in 1..=layers {
+                let grow = f32::from(layer) * step;
+                let shadow = Rect { x: rect.x - grow, y: rect.y - grow, w: rect.w + 2.0 * grow, h: rect.h + 2.0 * grow };
+                layered.round_rect(shadow, radius + grow, 0, alpha);
+            }
+        }
+        let mut single = vec![0xc0_d0_e0u32; 100 * 70];
+        Canvas { pixels: &mut single, width: 100, height: 70 }.soft_shadow(rect, radius, step, layers, alpha);
+        let channels = |pixel: u32| pixel.to_be_bytes().map(i16::from);
+        for (index, (a, b)) in layered.iter().zip(&single).enumerate() {
+            let (a, b) = (channels(*a), channels(*b));
+            for i in 1..4 {
+                assert!((a[i] - b[i]).abs() <= 2, "pixel {index}: {a:?} vs {b:?}");
+            }
+        }
+        assert_ne!(single[35 * 100 + 45], 0xc0_d0_e0, "darker under the surface");
+        assert_eq!(single[0], 0xc0_d0_e0, "untouched far from it");
     }
 
     #[test]

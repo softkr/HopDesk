@@ -181,8 +181,10 @@ impl Claude {
 
 impl Provider for Claude {
     fn user(&mut self, text: &str, screen: Option<&Shot>) {
-        let mut blocks: Vec<Value> = screen.map(image).into_iter().collect();
-        blocks.push(json!({ "type": "text", "text": text }));
+        // The words before the screenshot: knowing what to look for, Claude clicks more
+        // accurately.
+        let mut blocks = vec![json!({ "type": "text", "text": text })];
+        blocks.extend(screen.map(image));
         self.push_user(blocks);
     }
 
@@ -297,10 +299,12 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "computer_toolset_20260801");
         assert!(body["tools"][0].get("name").is_none());
         assert_eq!(body["fallbacks"], "default");
+        // The task comes before the screen: Claude clicks more accurately knowing what it looks
+        // for when it sees the screenshot.
         let content = &body["messages"][0]["content"];
-        assert_eq!(content[0]["type"], "image");
-        assert_eq!(content[0]["source"]["data"], "AQID");
-        assert_eq!(content[1]["text"], "open notepad");
+        assert_eq!(content[0]["text"], "open notepad");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["data"], "AQID");
     }
 
     #[test]
@@ -352,7 +356,7 @@ mod tests {
             actions,
             [
                 Action::Click {
-                    at: Some(Point { x: 200, y: 100 }),
+                    at: Some(Point { x: 201, y: 101 }),
                     button: Button::Left,
                     count: 1,
                     modifiers: vec![keysym::SHIFT],

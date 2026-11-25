@@ -4,7 +4,7 @@
 use core::time::Duration;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, bail};
@@ -24,10 +24,8 @@ use crate::agent::action::{Action, Point};
 use crate::agent::capture::Pixels;
 use crate::agent::{self, Command, Event, Options, Remote, State, provider};
 
-/// Time between redraws while the overlay moves on its own.
-const ANIMATION_FRAME: Duration = Duration::from_millis(33);
-/// How long proposed actions wait to be declined before they run by themselves.
-const AUTO_APPROVE_AFTER: Duration = Duration::from_secs(3);
+/// Time between redraws while the overlay moves on its own: 60 frames a second.
+const ANIMATION_FRAME: Duration = Duration::from_micros(16_667);
 /// Bubble lines per wheel notch, and trackpad points per line.
 const LINES_PER_NOTCH: f32 = 3.0;
 const PIXELS_PER_LINE: f32 = 20.0;
@@ -51,6 +49,8 @@ pub(super) struct Assistant {
     taken_over: Arc<AtomicBool>,
     /// Set while the overlay moves on its own.
     animating: Arc<AtomicBool>,
+    /// Screen updates received, for the agent to see when the screen settles.
+    frames: Arc<AtomicU64>,
     /// Last pointer position over the window, in physical pixels.
     cursor: (f32, f32),
     /// The release of a click the overlay took.
@@ -129,19 +129,21 @@ pub(super) fn start(
     }
     let (commands, receiver) = mpsc::unbounded_channel();
     let taken_over = Arc::new(AtomicBool::new(false));
+    let frames = Arc::new(AtomicU64::new(0));
     let remote = RdpRemote {
         proxy: proxy.clone(),
         input,
         driver: AgentDriver::new(),
+        frames: Arc::clone(&frames),
     };
     let events = Mutex::new(proxy);
     let emit = move |event: Event| {
         let proxy = events.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = proxy.send_event(SessionEvent::Agent(event));
     };
+    // "자동 실행" runs the actions at once, without asking first.
     let options = Options {
-        approve: true,
-        auto_approve: settings.auto_approve.then_some(AUTO_APPROVE_AFTER),
+        approve: !settings.auto_approve,
         coordinates: provider::coordinates(&settings),
     };
     runtime.spawn(agent::run(provider, remote, receiver, Arc::clone(&taken_over), emit, options));
@@ -151,6 +153,7 @@ pub(super) fn start(
         commands,
         taken_over,
         animating,
+        frames,
         cursor: (0.0, 0.0),
         swallow_release: false,
         drag: None,
@@ -290,6 +293,11 @@ impl Assistant {
         true
     }
 
+    /// Counts a screen update from the session.
+    pub(super) fn frame_arrived(&self) {
+        self.frames.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Keeps the overlay in step with the session after its output was handled.
     pub(super) fn after_output(&self, app: &App) {
         let mut overlay = self.overlay.borrow_mut();
@@ -318,10 +326,7 @@ impl Assistant {
                     overlay.propose(proposal);
                     answer = true;
                 }
-                Event::Pointer(point) => overlay.set_pointer(point),
-                Event::AutoApprove(after) => {
-                    overlay.set_countdown(after.map(|after| after.as_secs_f32()))
-                }
+                Event::Pointer { at, pressed } => overlay.set_pointer(at, pressed),
             }
         }
         self.sync_animation();
@@ -358,14 +363,6 @@ impl Assistant {
         if matches!(self.overlay.borrow().state(), State::Thinking | State::Acting) {
             self.taken_over.store(true, Ordering::Relaxed);
         }
-        self.hold();
-    }
-
-    /// The person is busy while a countdown runs: the proposal waits for an answer instead.
-    fn hold(&self) {
-        if self.overlay.borrow().counting() {
-            let _ = self.commands.send(Command::Hold);
-        }
     }
 
     /// Keeps the redraw ticks in step with whether the overlay moves on its own.
@@ -389,10 +386,7 @@ impl Assistant {
             Hit::Approve => Some(Command::Approve),
             Hit::Decline => Some(Command::Decline),
             Hit::Stop => Some(Command::Stop),
-            Hit::Panel => {
-                self.hold();
-                None
-            }
+            Hit::Panel => None,
         };
         if let Some(command) = command {
             let _ = self.commands.send(command);
@@ -438,10 +432,6 @@ impl Assistant {
             }
             Key::Named(NamedKey::Backspace) => overlay.backspace(),
             _ => {
-                // Writing an answer: the proposal waits for it.
-                if overlay.counting() {
-                    let _ = self.commands.send(Command::Hold);
-                }
                 // With an input method on macOS, typed text arrives as commits instead.
                 let commits = self.ime_active && cfg!(target_os = "macos");
                 if let (Some(text), false) = (&event.text, commits) {
@@ -494,6 +484,7 @@ struct RdpRemote {
     proxy: EventLoopProxy<SessionEvent>,
     input: RdpInputSender,
     driver: AgentDriver,
+    frames: Arc<AtomicU64>,
 }
 
 impl Remote for RdpRemote {
@@ -527,6 +518,10 @@ impl Remote for RdpRemote {
 
     fn cursor(&self) -> Point {
         self.driver.cursor()
+    }
+
+    fn frames(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
     }
 }
 

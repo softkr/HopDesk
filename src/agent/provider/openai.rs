@@ -305,11 +305,11 @@ mod tests {
         let actions = reply.calls[0].actions.as_ref().unwrap();
         assert_eq!(
             actions[0],
-            Action::Click { at: Some(Point { x: 200, y: 100 }), button: Button::Left, count: 1, modifiers: vec![keysym::SHIFT] }
+            Action::Click { at: Some(Point { x: 201, y: 101 }), button: Button::Left, count: 1, modifiers: vec![keysym::SHIFT] }
         );
         assert_eq!(actions[2], Action::Key { combo: action::parse_combo("ctrl+s").unwrap(), repeat: 1 });
         assert!(matches!(actions[3], Action::Scroll { direction: Direction::Up, amount: 3, .. }));
-        assert!(matches!(actions[4], Action::Drag { to: Point { x: 100, y: 100 }, .. }));
+        assert!(matches!(actions[4], Action::Drag { to: Point { x: 101, y: 101 }, .. }));
         openai.results(
             vec![CallResult { id: "call_1".into(), outcome: Ok(Output::Text("OK".into())) }],
             Some(&shot()),

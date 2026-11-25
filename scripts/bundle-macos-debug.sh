@@ -1,6 +1,9 @@
 #!/bin/sh
-# Builds a debug binary and wraps it in target/debug/HopDesk-Debug.app.
+# Builds an optimized binary and wraps it in target/debug/HopDesk-Debug.app.
 # Usage: scripts/bundle-macos-debug.sh [--install]
+#
+# The code is optimized like a release: unoptimized, drawing the session and the assistant runs
+# at a few frames a second, which hides how the app really behaves.
 #
 # Unlike the release bundle, this one keeps verbose logs: every run writes
 # ~/Library/Logs/HopDesk/<launcher run>.log and each session's full log lands in its own
@@ -22,8 +25,8 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-cargo build
-BIN=target/debug/hopdesk
+cargo build --release
+BIN=target/release/hopdesk
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 APP=target/debug/HopDesk-Debug.app
 

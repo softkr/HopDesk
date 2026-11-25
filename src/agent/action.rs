@@ -141,12 +141,20 @@ impl Scale {
 
     /// The remote pixel under the model's position; positions off the screenshot are refused,
     /// so the model learns of its mistake instead of clicking somewhere else.
+    ///
+    /// A screenshot pixel covers a block of remote pixels when the screenshot is scaled down:
+    /// the middle of that block is the one meant, not its top left corner. Normalized positions
+    /// are fractions of the screen, as their providers convert them.
     pub fn point(&self, x: f64, y: f64) -> anyhow::Result<Point> {
         let (fx, fy) = self.fractions(x, y)?;
+        let (half_x, half_y) = match self.coordinates {
+            Coordinates::Pixels => (0.5 / f64::from(self.shot.0), 0.5 / f64::from(self.shot.1)),
+            Coordinates::Normalized => (0.0, 0.0),
+        };
         let pixel = |fraction: f64, size: u32| scale_down(fraction, size).min(size.saturating_sub(1));
         Ok(Point {
-            x: pixel(fx, self.screen.0),
-            y: pixel(fy, self.screen.1),
+            x: pixel(fx + half_x, self.screen.0),
+            y: pixel(fy + half_y, self.screen.1),
         })
     }
 
@@ -332,11 +340,21 @@ mod tests {
     #[test]
     fn screenshot_pixels_map_onto_the_remote_screen() {
         let scale = Scale::new((2560, 1600), (1280, 800), Coordinates::Pixels);
-        assert_eq!(scale.point(0.0, 0.0).unwrap(), Point { x: 0, y: 0 });
-        assert_eq!(scale.point(640.0, 400.0).unwrap(), Point { x: 1280, y: 800 });
+        // A screenshot pixel covers 2x2 screen pixels: the click goes to the middle of them,
+        // not to their top left corner.
+        assert_eq!(scale.point(0.0, 0.0).unwrap(), Point { x: 1, y: 1 });
+        assert_eq!(scale.point(640.0, 400.0).unwrap(), Point { x: 1281, y: 801 });
         // The far edge is still on the screen.
         assert_eq!(scale.point(1280.0, 800.0).unwrap(), Point { x: 2559, y: 1599 });
-        assert_eq!(scale.to_model(Point { x: 1280, y: 800 }), (640, 400));
+        assert_eq!(scale.to_model(Point { x: 1281, y: 801 }), (640, 400));
+    }
+
+    #[test]
+    fn unscaled_screenshots_click_the_very_pixel() {
+        let scale = Scale::new((1280, 720), (1280, 720), Coordinates::Pixels);
+        assert_eq!(scale.point(0.0, 0.0).unwrap(), Point { x: 0, y: 0 });
+        assert_eq!(scale.point(517.0, 333.0).unwrap(), Point { x: 517, y: 333 });
+        assert_eq!(scale.point(1279.0, 719.0).unwrap(), Point { x: 1279, y: 719 });
     }
 
     #[test]

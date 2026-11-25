@@ -38,6 +38,20 @@ const MIN_LINES: usize = 3;
 const FADE: f32 = 0.18;
 /// Messages kept for the panel.
 const MAX_MESSAGES: usize = 30;
+/// How long the AI's pointer takes to glide to a new place, and a click's ripple after it, in
+/// seconds.
+const GLIDE: f32 = 0.22;
+const RIPPLE: f32 = 0.45;
+/// The AI's pointer: an arrow with its tip at the origin, in points.
+const ARROW: [(f32, f32); 7] = [
+    (0.0, 0.0),
+    (0.0, 16.0),
+    (4.0, 12.3),
+    (6.8, 18.3),
+    (9.3, 17.2),
+    (6.6, 11.4),
+    (11.8, 11.4),
+];
 
 const WHITE: Color = 0xff_ff_ff;
 const BLACK: Color = 0x00_00_00;
@@ -137,7 +151,7 @@ pub(super) struct Overlay {
     messages: VecDeque<(Who, String)>,
     proposal: Vec<(String, Option<Point>)>,
     /// The AI's pointer on the session.
-    pointer: Option<Point>,
+    pointer: Option<AiPointer>,
     /// Session size, to place markers on the stretched frame.
     session: (u16, u16),
     input: String,
@@ -154,9 +168,41 @@ pub(super) struct Overlay {
     visibility: f32,
     /// A fade under way: the visibility it began at, and when (set at the next paint).
     fade: Option<(f32, Option<f32>)>,
-    /// The proposal runs by itself after this many seconds, counted from the time given (set at
-    /// the next paint).
-    countdown: Option<(f32, Option<f32>)>,
+}
+
+/// The AI's pointer on the session: where it goes, where it set out from (session pixels), since
+/// when (set at the next paint), and whether it clicked there.
+struct AiPointer {
+    to: Point,
+    from: (f32, f32),
+    since: Option<f32>,
+    pressed: bool,
+}
+
+impl AiPointer {
+    fn elapsed(&self, time: f32) -> f32 {
+        self.since.map_or(0.0, |since| (time - since).max(0.0))
+    }
+
+    /// Where it shows at `time`, slowing down as it arrives.
+    fn position(&self, time: f32) -> (f32, f32) {
+        let progress = (self.elapsed(time) / GLIDE).min(1.0);
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        #[expect(clippy::cast_precision_loss, reason = "screen coordinates")]
+        let to = (self.to.x as f32, self.to.y as f32);
+        (self.from.0 + (to.0 - self.from.0) * eased, self.from.1 + (to.1 - self.from.1) * eased)
+    }
+
+    /// How far a click's ripple has spread (0 to 1), while it shows.
+    fn ripple(&self, time: f32) -> Option<f32> {
+        let spread = (self.elapsed(time) - GLIDE) / RIPPLE;
+        (self.pressed && (0.0..1.0).contains(&spread)).then_some(spread)
+    }
+
+    fn moving(&self, time: f32) -> bool {
+        let settled = if self.pressed { GLIDE + RIPPLE } else { GLIDE };
+        self.since.is_none() || self.elapsed(time) < settled
+    }
 }
 
 impl Overlay {
@@ -187,7 +233,6 @@ impl Overlay {
             time: 0.0,
             visibility: 0.0,
             fade: None,
-            countdown: None,
         }
     }
 
@@ -233,17 +278,7 @@ impl Overlay {
     pub(super) fn animating(&self) -> bool {
         matches!(self.state, State::Thinking | State::Acting)
             || self.fade.is_some()
-            || self.countdown.is_some()
-    }
-
-    /// Starts (or with `None` cancels) the countdown after which the proposal runs by itself.
-    pub(super) fn set_countdown(&mut self, seconds: Option<f32>) {
-        self.countdown = seconds.map(|seconds| (seconds, None));
-    }
-
-    /// Whether the proposal is counting down to run by itself.
-    pub(super) fn counting(&self) -> bool {
-        self.countdown.is_some()
+            || self.pointer.as_ref().is_some_and(|pointer| pointer.moving(self.time))
     }
 
     pub(super) fn input_is_empty(&self) -> bool {
@@ -269,7 +304,6 @@ impl Overlay {
         }
         if state != State::Approval {
             self.proposal.clear();
-            self.countdown = None;
         }
         if state == State::Idle {
             self.pointer = None;
@@ -309,8 +343,20 @@ impl Overlay {
         self.scroll = usize::try_from(scroll.max(0)).unwrap_or(0).min(self.max_scroll);
     }
 
-    pub(super) fn set_pointer(&mut self, point: Point) {
-        self.pointer = Some(point);
+    /// Moves the AI's pointer to `to`, gliding from where it shows now; `pressed` marks a click
+    /// there.
+    pub(super) fn set_pointer(&mut self, to: Point, pressed: bool) {
+        #[expect(clippy::cast_precision_loss, reason = "screen coordinates")]
+        let from = self
+            .pointer
+            .as_ref()
+            .map_or((to.x as f32, to.y as f32), |pointer| pointer.position(self.time));
+        self.pointer = Some(AiPointer {
+            to,
+            from,
+            since: None,
+            pressed,
+        });
     }
 
     fn push(&mut self, who: Who, text: String) {
@@ -379,9 +425,9 @@ impl Overlay {
         let (w, h) = (width as f32, height as f32);
         let s = self.scale;
         self.window = Some((w / s, h / s));
-        // A countdown runs from the first frame after it was set, shown or not.
-        if let Some((_, start)) = &mut self.countdown {
-            start.get_or_insert(self.time);
+        // A glide starts at the first frame that shows it.
+        if let Some(pointer) = &mut self.pointer {
+            pointer.since.get_or_insert(self.time);
         }
         self.paint_markers(&mut canvas, w, h);
         if self.state == State::Acting {
@@ -517,20 +563,7 @@ impl Overlay {
             }
         }
         // The first button is the default one, drawn rightmost.
-        // Seconds until the proposal runs by itself, counted from the first paint that shows it.
-        let time = self.time;
-        let remaining = self
-            .countdown
-            .as_mut()
-            .map(|(seconds, start)| (*seconds - (time - *start.get_or_insert(time))).max(0.0));
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a few seconds"
-        )]
-        let seconds_left = remaining.map(|remaining| remaining.ceil() as u32);
-        let run_label = seconds_left.map_or_else(|| "실행".to_owned(), |left| format!("실행 {left}"));
-        let (buttons, hint) = controls(self.state, seconds_left, !self.input_is_empty());
+        let (buttons, hint) = controls(self.state, !self.input_is_empty());
         let header = small_line + 18.0 * s;
         #[expect(clippy::cast_precision_loss, reason = "a few lines")]
         let proposal_height = if proposal.is_empty() {
@@ -745,11 +778,6 @@ impl Overlay {
         let button_y = rect.y + rect.h - PADDING * s - BUTTON_HEIGHT * s;
         let mut button_right = right;
         for (index, (label, hit)) in buttons.iter().enumerate() {
-            let label: &str = if *hit == Hit::Approve && self.state == State::Approval {
-                &run_label
-            } else {
-                label
-            };
             // An icon before the label: its width, and the gap after it.
             let icon_room = BUTTON_ICON * s + 6.0 * s;
             let button = Rect {
@@ -885,16 +913,11 @@ impl Overlay {
         let s = self.scale;
         let theme = self.theme();
         // Many faint layers make one soft shadow, a little below the surface.
-        for layer in 1..=10u8 {
-            let grow = f32::from(layer) * 1.5 * s;
-            let shadow = Rect {
-                x: rect.x - grow,
-                y: rect.y - grow + 5.0 * s,
-                w: rect.w + 2.0 * grow,
-                h: rect.h + 2.0 * grow,
-            };
-            canvas.round_rect(shadow, radius + grow, BLACK, 0.012);
-        }
+        let below = Rect {
+            y: rect.y + 5.0 * s,
+            ..rect
+        };
+        canvas.soft_shadow(below, radius, 1.5 * s, 10, 0.012);
         canvas.frost(rect, radius, theme.glass, theme.glass_strength);
         canvas.round_rect_stroke(
             rect,
@@ -983,14 +1006,43 @@ impl Overlay {
                 paint_number(canvas, text, badge, 7.75 * s, index + 1, (MARKER, 1.0), WHITE, s);
             }
         }
-        if let Some(point) = self.pointer {
-            let (x, y) = place(point);
-            let color = state_color(State::Acting);
-            canvas.ring(x, y, 6.0 * s, 5.0 * s, BLACK, 0.22);
-            canvas.ring(x, y, 6.0 * s, 3.0 * s, WHITE, 0.95);
-            canvas.ring(x, y, 6.0 * s, 1.5 * s, color, 1.0);
-            canvas.circle(x, y, 1.25 * s, color, 1.0);
+        if let Some(pointer) = &self.pointer {
+            let (px, py) = pointer.position(self.time);
+            let (x, y) = ((px + 0.5) * w / sw, (py + 0.5) * h / sh);
+            self.paint_pointer(canvas, (x, y), pointer.ripple(self.time));
         }
+    }
+
+    /// The AI's pointer as an arrow whose tip is at (`x`, `y`), tagged "AI" so it is not taken
+    /// for the person's; `ripple` (0 to 1) spreads a ring from the tip after a click.
+    fn paint_pointer(&self, canvas: &mut Canvas<'_>, (x, y): (f32, f32), ripple: Option<f32>) {
+        let s = self.scale;
+        let color = state_color(State::Acting);
+        if let Some(ripple) = ripple {
+            let eased = 1.0 - (1.0 - ripple).powi(2);
+            canvas.ring(x, y, (4.0 + 18.0 * eased) * s, 2.5 * s, color, 0.85 * (1.0 - ripple));
+        }
+        let arrow = |dx: f32, dy: f32| ARROW.map(|(ax, ay)| (x + (ax + dx) * s, y + (ay + dy) * s));
+        canvas.polygon(&arrow(0.6, 1.4), 1.8 * s, BLACK, 0.25);
+        canvas.polygon(&arrow(0.0, 0.0), 1.5 * s, WHITE, 1.0);
+        canvas.polygon(&arrow(0.0, 0.0), 0.0, color, 1.0);
+        let Some(text) = &self.text else { return };
+        let size = 10.0 * s;
+        let tag = Rect {
+            x: x + 12.0 * s,
+            y: y + 16.0 * s,
+            w: text.width("AI", size) + 10.0 * s,
+            h: 16.0 * s,
+        };
+        let edge = Rect {
+            x: tag.x - 1.0 * s,
+            y: tag.y - 1.0 * s,
+            w: tag.w + 2.0 * s,
+            h: tag.h + 2.0 * s,
+        };
+        canvas.round_rect(edge, edge.h / 2.0, WHITE, 1.0);
+        canvas.round_rect(tag, tag.h / 2.0, color, 1.0);
+        text.draw(canvas, tag.x + 5.0 * s, tag.y + (tag.h - text.line_height(size)) / 2.0, "AI", size, WHITE);
     }
 
     /// "AI 조작 중" in a dark glass capsule at the top of the window, with a stop button.
@@ -1096,18 +1148,17 @@ fn paint_number(
 
 /// The buttons under the conversation, the default one first, and what the keys do now: with
 /// something typed, Return sends it instead of answering.
-fn controls(state: State, seconds_left: Option<u32>, typing: bool) -> (&'static [(&'static str, Hit)], String) {
+fn controls(state: State, typing: bool) -> (&'static [(&'static str, Hit)], String) {
     let (buttons, enter, escape): (&'static [(&'static str, Hit)], Option<&str>, &str) = match state {
         State::Approval => (&[("실행", Hit::Approve), ("거절", Hit::Decline)], Some("실행"), "거절"),
         State::TakenOver => (&[("계속", Hit::Approve), ("중단", Hit::Stop)], Some("계속"), "중단"),
         State::Thinking | State::Acting => (&[("중단", Hit::Stop)], None, "중단"),
         State::Idle => return (&[], String::new()),
     };
-    let first = match (typing, state, seconds_left, enter) {
-        (true, ..) => "Enter 전송".to_owned(),
-        (false, State::Approval, Some(left), _) => format!("{left}초 뒤 자동 실행"),
-        (false, _, _, Some(enter)) => format!("Enter {enter}"),
-        (false, _, _, None) => return (buttons, format!("Esc {escape}")),
+    let first = match (typing, enter) {
+        (true, _) => "Enter 전송".to_owned(),
+        (false, Some(enter)) => format!("Enter {enter}"),
+        (false, None) => return (buttons, format!("Esc {escape}")),
     };
     (buttons, format!("{first} · Esc {escape}"))
 }
@@ -1182,7 +1233,7 @@ mod tests {
                 ]);
             }
             if state == State::Acting {
-                overlay.set_pointer(Point { x: 900, y: 500 });
+                overlay.set_pointer(Point { x: 900, y: 500 }, false);
             }
             if talked {
                 overlay.type_text("창을 닫아줘");
@@ -1226,6 +1277,57 @@ mod tests {
                 .save(std::path::Path::new(&dir).join(format!("{name}.png")))
                 .unwrap();
         }
+    }
+
+    /// An overlay showing the AI's pointer over a black 1280x800 session, the window's size.
+    fn pointing() -> (Overlay, Vec<u32>) {
+        let mut overlay = Overlay::new(Text::load(), "api.anthropic.com");
+        overlay.set_session((1280, 800));
+        // A state that does not move by itself, so only the pointer does.
+        overlay.set_state(State::Approval);
+        (overlay, vec![0u32; 1280 * 800])
+    }
+
+    #[test]
+    fn the_ai_pointer_glides_to_its_new_place() {
+        let (mut overlay, mut pixels) = pointing();
+        overlay.set_pointer(Point { x: 100, y: 100 }, false);
+        painted(&mut overlay);
+        assert!(!overlay.animating(), "it stands still once there");
+        let start = overlay.time;
+        overlay.set_pointer(Point { x: 300, y: 100 }, false);
+        overlay.paint(&mut pixels, 1280, 800);
+        assert!(overlay.animating());
+        overlay.set_time(start + GLIDE / 2.0);
+        let (x, y) = overlay.pointer.as_ref().unwrap().position(overlay.time);
+        assert!(100.0 < x && x < 300.0 && (y - 100.0).abs() < f32::EPSILON, "on its way: {x}");
+        overlay.set_time(start + GLIDE);
+        assert_eq!(overlay.pointer.as_ref().unwrap().position(overlay.time), (300.0, 100.0));
+        assert!(!overlay.animating());
+    }
+
+    #[test]
+    fn a_click_ripples_once_the_pointer_arrives() {
+        let (mut overlay, mut pixels) = pointing();
+        overlay.set_pointer(Point { x: 100, y: 100 }, true);
+        overlay.paint(&mut pixels, 1280, 800);
+        let start = overlay.time;
+        overlay.set_time(start + GLIDE + RIPPLE / 2.0);
+        assert!(overlay.animating(), "rippling");
+        overlay.set_time(start + GLIDE + RIPPLE);
+        assert!(!overlay.animating());
+    }
+
+    #[test]
+    fn the_arrow_tip_is_on_the_spot() {
+        let (mut overlay, mut pixels) = pointing();
+        overlay.set_pointer(Point { x: 600, y: 400 }, false);
+        painted(&mut overlay);
+        overlay.paint(&mut pixels, 1280, 800);
+        let at = |x: usize, y: usize| pixels[y * 1280 + x];
+        assert_ne!(at(600, 400), 0, "the tip covers the pixel it points at");
+        assert_eq!(at(603, 410), state_color(State::Acting), "the arrow body below the tip");
+        assert_eq!(at(597, 397), 0, "nothing above and left of the tip");
     }
 
     #[test]
@@ -1322,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_fades_and_a_countdown_names_the_seconds_left() {
+    fn the_panel_fades_in() {
         let mut overlay = Overlay::new(Text::load(), "api.anthropic.com");
         if overlay.text.is_none() {
             return;
@@ -1330,7 +1432,6 @@ mod tests {
         let mut pixels = vec![0u32; 1280 * 800];
         overlay.set_state(State::Approval);
         overlay.propose(vec![("클릭".into(), None)]);
-        overlay.set_countdown(Some(3.0));
         overlay.paint(&mut pixels, 1280, 800);
         assert!(overlay.animating() && overlay.visibility < 1.0, "fading in");
         overlay.set_time(FADE / 2.0);
@@ -1339,32 +1440,23 @@ mod tests {
         overlay.set_time(1.5);
         overlay.paint(&mut pixels, 1280, 800);
         assert!((overlay.visibility - 1.0).abs() < f32::EPSILON && overlay.fade.is_none());
-        assert_eq!(
-            overlay.countdown,
-            Some((3.0, Some(0.0))),
-            "counted from the first paint"
-        );
-        overlay.set_state(State::Acting);
-        assert!(!overlay.counting(), "the countdown ends with the approval");
     }
 
     #[test]
     fn the_hint_names_what_the_keys_do_now() {
-        let labels = |state, left, typing| {
-            let (buttons, hint) = controls(state, left, typing);
+        let labels = |state, typing| {
+            let (buttons, hint) = controls(state, typing);
             (buttons.iter().map(|(label, _)| *label).collect::<Vec<_>>(), hint)
         };
-        assert_eq!(labels(State::Approval, None, false), (vec!["실행", "거절"], "Enter 실행 · Esc 거절".to_owned()));
-        assert_eq!(labels(State::Approval, Some(3), false).1, "3초 뒤 자동 실행 · Esc 거절");
+        assert_eq!(labels(State::Approval, false), (vec!["실행", "거절"], "Enter 실행 · Esc 거절".to_owned()));
         // With something typed, Return sends it instead of answering.
-        assert_eq!(labels(State::Approval, None, true).1, "Enter 전송 · Esc 거절");
-        assert_eq!(labels(State::Approval, Some(2), true).1, "Enter 전송 · Esc 거절");
+        assert_eq!(labels(State::Approval, true).1, "Enter 전송 · Esc 거절");
         // Stopping is "중단" in every state.
-        assert_eq!(labels(State::TakenOver, None, false), (vec!["계속", "중단"], "Enter 계속 · Esc 중단".to_owned()));
-        assert_eq!(labels(State::TakenOver, None, true).1, "Enter 전송 · Esc 중단");
-        assert_eq!(labels(State::Acting, None, false), (vec!["중단"], "Esc 중단".to_owned()));
-        assert_eq!(labels(State::Thinking, None, true).1, "Enter 전송 · Esc 중단");
-        assert_eq!(labels(State::Idle, None, false), (vec![], String::new()));
+        assert_eq!(labels(State::TakenOver, false), (vec!["계속", "중단"], "Enter 계속 · Esc 중단".to_owned()));
+        assert_eq!(labels(State::TakenOver, true).1, "Enter 전송 · Esc 중단");
+        assert_eq!(labels(State::Acting, false), (vec!["중단"], "Esc 중단".to_owned()));
+        assert_eq!(labels(State::Thinking, true).1, "Enter 전송 · Esc 중단");
+        assert_eq!(labels(State::Idle, false), (vec![], String::new()));
     }
 
     #[test]

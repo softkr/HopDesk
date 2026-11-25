@@ -221,7 +221,7 @@ pub struct AiSettings {
     /// How a compatible server's model gives positions.
     #[serde(default)]
     pub coordinates: crate::agent::action::Coordinates,
-    /// Proposed actions run by themselves when not declined within a few seconds.
+    /// Proposed actions run at once, without waiting for approval.
     #[serde(default)]
     pub auto_approve: bool,
 }

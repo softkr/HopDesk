@@ -252,7 +252,7 @@ impl AiForm {
                         ui.add(egui::Separator::default().spacing(0.0));
                         // Acting by itself means nothing while the AI is off.
                         ui.add_enabled_ui(self.enabled, |ui| {
-                            switch_row(ui, widgets::Icon::Zap, ORANGE, "자동 실행", Some("거절하지 않으면 3초 뒤 실행합니다"), &mut self.auto_approve);
+                            switch_row(ui, widgets::Icon::Zap, ORANGE, "자동 실행", Some("확인 없이 바로 실행합니다"), &mut self.auto_approve);
                         });
                     },
                 );

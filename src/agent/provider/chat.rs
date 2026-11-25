@@ -148,7 +148,7 @@ mod tests {
         assert_eq!(reply.text, "Clicking Start.");
         assert_eq!(
             reply.calls[0].actions.as_ref().unwrap()[0],
-            Action::Click { at: Some(Point { x: 20, y: 40 }), button: Button::Left, count: 1, modifiers: vec![] }
+            Action::Click { at: Some(Point { x: 21, y: 41 }), button: Button::Left, count: 1, modifiers: vec![] }
         );
         assert_eq!(reply.calls[1].actions.as_ref().unwrap()[0], Action::Type { text: "hi".into() });
         assert!(reply.calls[2].actions.is_err());
