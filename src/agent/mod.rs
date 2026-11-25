@@ -21,8 +21,6 @@ use self::action::{Action, Coordinates, Point, Scale};
 use self::capture::{Pixels, Shot};
 use self::provider::{Call, CallResult, Output, Provider};
 
-/// Where the Anthropic API key is kept in the OS credential store.
-pub const API_KEY_ACCOUNT: &str = "ai:anthropic";
 /// Model turns with actions per task, so a model that loops cannot run up costs unattended.
 pub const MAX_STEPS: usize = 50;
 /// How often a wait checks whether the person took over or stopped.
@@ -197,8 +195,10 @@ impl<R: Remote, E: Fn(Event) + Send + Sync> Agent<'_, R, E> {
             if reply.calls.is_empty() {
                 return Ended::Done;
             }
-            if self.approve && reply.calls.iter().any(needs_approval) {
-                (self.emit)(Event::Proposal(reply.calls.iter().map(describe).collect()));
+            // A provider's safety check always asks the person, also without approval mode.
+            let confirm = reply.calls.iter().any(|call| call.confirm.is_some());
+            if confirm || (self.approve && reply.calls.iter().any(needs_approval)) {
+                (self.emit)(Event::Proposal(reply.calls.iter().flat_map(describe).collect()));
                 (self.emit)(Event::State(State::Approval));
                 match approval(commands).await {
                     Approval::Approved => {}
@@ -258,8 +258,8 @@ impl<R: Remote, E: Fn(Event) + Send + Sync> Agent<'_, R, E> {
                 failed = true;
                 Err(TAKEN_OVER.to_owned())
             } else {
-                match &call.action {
-                    Ok(action) => self.carry_out_one(action).await.map_err(|error| format!("{error:#}")),
+                match &call.actions {
+                    Ok(actions) => self.carry_out_call(actions, commands).await,
                     Err(error) => Err(error.clone()),
                 }
             };
@@ -270,6 +270,19 @@ impl<R: Remote, E: Fn(Event) + Send + Sync> Agent<'_, R, E> {
             });
         }
         (results, stopped)
+    }
+
+    /// The actions of one call in order; the call's result is the last action's output, or the
+    /// first failure.
+    async fn carry_out_call(&mut self, actions: &[Action], commands: &mut Commands) -> Result<Output, String> {
+        let mut output = Output::Text("OK".into());
+        for (index, action) in actions.iter().enumerate() {
+            if index > 0 && (self.taken_over.load(Ordering::Relaxed) || commands.stop_requested()) {
+                return Err(TAKEN_OVER.to_owned());
+            }
+            output = self.carry_out_one(action).await.map_err(|error| format!("{error:#}"))?;
+        }
+        Ok(output)
     }
 
     async fn carry_out_one(&mut self, action: &Action) -> anyhow::Result<Output> {
@@ -363,10 +376,10 @@ async fn wait_for_stop(commands: &mut Commands) -> Option<String> {
 
 /// Looking at the screen and waiting change nothing, so they need no approval.
 fn needs_approval(call: &Call) -> bool {
-    !matches!(
-        call.action,
-        Ok(Action::Screenshot | Action::Zoom { .. } | Action::CursorPosition | Action::Wait { .. }) | Err(_)
-    )
+    let observes = |action: &Action| {
+        matches!(action, Action::Screenshot | Action::Zoom { .. } | Action::CursorPosition | Action::Wait { .. })
+    };
+    call.confirm.is_some() || call.actions.as_ref().is_ok_and(|actions| !actions.iter().all(observes))
 }
 
 fn refuse_all(calls: &[Call], reason: &str) -> Vec<CallResult> {
@@ -379,11 +392,21 @@ fn refuse_all(calls: &[Call], reason: &str) -> Vec<CallResult> {
         .collect()
 }
 
-/// A short Korean description of a call for the approval list, and where it acts.
-fn describe(call: &Call) -> (String, Option<Point>) {
-    let Ok(action) = &call.action else {
-        return ("(알 수 없는 동작)".into(), None);
-    };
+/// Short Korean descriptions of a call's actions for the approval list, and where each acts;
+/// a provider's safety check comes first.
+fn describe(call: &Call) -> Vec<(String, Option<Point>)> {
+    let mut lines: Vec<(String, Option<Point>)> = Vec::new();
+    if let Some(check) = &call.confirm {
+        lines.push((format!("⚠ 확인 필요: {check}"), None));
+    }
+    match &call.actions {
+        Ok(actions) => lines.extend(actions.iter().map(describe_action)),
+        Err(_) => lines.push(("(알 수 없는 동작)".into(), None)),
+    }
+    lines
+}
+
+fn describe_action(action: &Action) -> (String, Option<Point>) {
     match action {
         Action::Screenshot => ("화면 보기".into(), None),
         Action::Zoom { .. } => ("화면 확대해 보기".into(), None),
@@ -480,15 +503,15 @@ mod tests {
     }
 
     fn click(id: &str) -> Call {
-        Call {
-            id: id.into(),
-            action: Ok(Action::Click {
+        Call::one(
+            id.into(),
+            Ok(Action::Click {
                 at: Some(Point { x: 1, y: 2 }),
                 button: Button::Left,
                 count: 1,
                 modifiers: vec![],
             }),
-        }
+        )
     }
 
     struct Run {
@@ -568,10 +591,7 @@ mod tests {
 
     #[test]
     fn a_failed_call_skips_the_rest_of_the_batch() {
-        let broken = Call {
-            id: "a".into(),
-            action: Err("bad coordinate".into()),
-        };
+        let broken = Call::one("a".into(), Err("bad coordinate".into()));
         let replies = vec![Reply {
             text: String::new(),
             calls: vec![broken, click("b")],

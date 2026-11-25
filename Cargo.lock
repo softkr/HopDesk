@@ -3356,6 +3356,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "url",
  "uuid",
  "vnc-rs",
  "whoami",

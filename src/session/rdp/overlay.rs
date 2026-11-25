@@ -23,8 +23,10 @@ const SMALL_FONT: f32 = 12.0;
 const INPUT_HEIGHT: f32 = 38.0;
 const BUTTON_HEIGHT: f32 = 28.0;
 const RADIUS: f32 = 12.0;
-/// Lines of conversation the bubble shows; older ones scroll away.
-const MAX_LINES: usize = 8;
+/// Lines of conversation the bubble shows at most, and at least where the window is small;
+/// older ones are reached with the mouse wheel.
+const MAX_LINES: usize = 14;
+const MIN_LINES: usize = 3;
 /// Messages kept for the bubble.
 const MAX_MESSAGES: usize = 30;
 
@@ -65,6 +67,11 @@ pub(super) struct Overlay {
     /// The window size in points at the last paint, to keep a dragged character inside it.
     window: Option<(f32, f32)>,
     expanded: bool,
+    /// The AI said something while the bubble was hidden.
+    unread: bool,
+    /// Lines the conversation is scrolled back from the newest, and how far it can go.
+    scroll: usize,
+    max_scroll: usize,
     state: State,
     messages: VecDeque<(Who, String)>,
     proposal: Vec<(String, Option<Point>)>,
@@ -87,7 +94,11 @@ impl Overlay {
             scale: 1.0,
             corner: (MARGIN, BOTTOM_MARGIN),
             window: None,
-            expanded: true,
+            // Only the character at first; it opens by a click, or when the person is needed.
+            expanded: false,
+            unread: false,
+            scroll: 0,
+            max_scroll: 0,
             state: State::Idle,
             messages: VecDeque::new(),
             proposal: Vec::new(),
@@ -98,7 +109,7 @@ impl Overlay {
             focused: false,
             hits: Vec::new(),
         };
-        overlay.notice(format!(
+        overlay.push(Who::HopDesk, format!(
             "무엇을 도와드릴까요? 아래에 할 일을 적어 주세요. 화면은 {endpoint}로 전송되고, 동작은 실행 전에 확인을 받습니다."
         ));
         overlay
@@ -136,6 +147,9 @@ impl Overlay {
 
     pub(super) fn set_state(&mut self, state: State) {
         self.state = state;
+        if state == State::TakenOver {
+            self.expand();
+        }
         if state != State::Approval {
             self.proposal.clear();
         }
@@ -145,15 +159,33 @@ impl Overlay {
     }
 
     pub(super) fn say(&mut self, text: String) {
-        self.push(Who::Ai, text);
+        self.push(Who::Ai, plain(&text));
+        if !self.expanded {
+            self.unread = true;
+        }
     }
 
+    /// HopDesk's own messages (stops, errors) open the bubble.
     pub(super) fn notice(&mut self, text: String) {
         self.push(Who::HopDesk, text);
+        self.expand();
     }
 
+    /// Actions waiting for approval open the bubble, where the buttons are.
     pub(super) fn propose(&mut self, proposal: Vec<(String, Option<Point>)>) {
         self.proposal = proposal;
+        self.expand();
+    }
+
+    fn expand(&mut self) {
+        self.expanded = true;
+        self.unread = false;
+    }
+
+    /// Scrolls the conversation by `lines`, positive toward older ones.
+    pub(super) fn scroll_by(&mut self, lines: i32) {
+        let scroll = i64::try_from(self.scroll).unwrap_or(0) + i64::from(lines);
+        self.scroll = usize::try_from(scroll.max(0)).unwrap_or(0).min(self.max_scroll);
     }
 
     pub(super) fn set_pointer(&mut self, point: Point) {
@@ -161,6 +193,8 @@ impl Overlay {
     }
 
     fn push(&mut self, who: Who, text: String) {
+        // Something new: back to the newest lines.
+        self.scroll = 0;
         self.messages.push_back((who, text));
         while self.messages.len() > MAX_MESSAGES {
             self.messages.pop_front();
@@ -202,13 +236,16 @@ impl Overlay {
 
     /// The part of the overlay at a window position (physical pixels).
     pub(super) fn hit(&self, x: f32, y: f32) -> Option<Hit> {
-        self.hits.iter().find(|(rect, _)| rect.contains(x, y)).map(|(_, hit)| *hit)
+        // What was drawn last is on top: a button wins over the bubble behind it.
+        self.hits.iter().rev().find(|(rect, _)| rect.contains(x, y)).map(|(_, hit)| *hit)
     }
 
     pub(super) fn toggle(&mut self) {
-        self.expanded = !self.expanded;
-        if !self.expanded {
+        if self.expanded {
+            self.expanded = false;
             self.set_focused(false);
+        } else {
+            self.expand();
         }
     }
 
@@ -275,8 +312,6 @@ impl Overlay {
                 lines.push((color, wrapped));
             }
         }
-        let skip = lines.len().saturating_sub(MAX_LINES);
-        let lines = &lines[skip..];
         let mut proposal: Vec<String> = Vec::new();
         for (index, (description, _)) in self.proposal.iter().enumerate() {
             proposal.extend(text.wrap(&format!("{}. {description}", index + 1), FONT * s, inner));
@@ -287,11 +322,27 @@ impl Overlay {
             State::Thinking | State::Acting => &[("중단", Hit::Stop)],
             State::Idle => &[],
         };
+        let buttons_height = if buttons.is_empty() { 0.0 } else { (BUTTON_HEIGHT + GAP) * s };
+        #[expect(clippy::cast_precision_loss, reason = "a few lines")]
+        let fixed = 2.0 * PADDING * s + small_line + GAP * s * 0.5 + proposal.len() as f32 * line + buttons_height;
+
+        // As many lines as fit above or below the message box, then scrolled with the wheel.
+        let window_height = self.window.map_or(f32::MAX, |(_, h)| h * s);
+        let room = (input.y - GAP * s - EDGE * s).max(window_height - (input.y + input.h + GAP * s) - EDGE * s);
+        // Room for the two "more" hints too.
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a few lines")]
+        let fit = (((room - fixed - 2.0 * small_line) / line).floor().max(0.0) as usize).clamp(MIN_LINES, MAX_LINES);
+        let shown = lines.len().min(fit);
+        self.max_scroll = lines.len() - shown;
+        self.scroll = self.scroll.min(self.max_scroll);
+        let start = lines.len() - shown - self.scroll;
+        let older = start > 0;
+        let newer = self.scroll > 0;
+        let lines = &lines[start..start + shown];
 
         #[expect(clippy::cast_precision_loss, reason = "a few lines")]
-        let body = (lines.len() + proposal.len()) as f32 * line;
-        let buttons_height = if buttons.is_empty() { 0.0 } else { (BUTTON_HEIGHT + GAP) * s };
-        let height = 2.0 * PADDING * s + small_line + GAP * s * 0.5 + body + buttons_height;
+        let body = lines.len() as f32 * line + f32::from(u8::from(older) + u8::from(newer)) * small_line;
+        let height = fixed + body;
         let above = input.y - GAP * s - height;
         let rect = Rect {
             x,
@@ -307,9 +358,17 @@ impl Overlay {
         let after = text.draw(canvas, left, y, "HopDesk AI", SMALL_FONT * s, INK);
         text.draw(canvas, after + 8.0 * s, y, state_label(self.state), SMALL_FONT * s, state_color(self.state));
         y += small_line + GAP * s * 0.5;
+        if older {
+            text.draw(canvas, left, y, "▲ 이전 내용 · 휠로 스크롤", SMALL_FONT * s, MUTED);
+            y += small_line;
+        }
         for (color, line_text) in lines {
             text.draw(canvas, left, y, line_text, FONT * s, *color);
             y += line;
+        }
+        if newer {
+            text.draw(canvas, left, y, "▼ 최근 내용", SMALL_FONT * s, MUTED);
+            y += small_line;
         }
         for line_text in &proposal {
             text.draw(canvas, left, y, line_text, FONT * s, 0xb4_53_09);
@@ -424,6 +483,9 @@ impl Overlay {
         }
         if self.state == State::Approval {
             canvas.circle(rect.x + rect.w - 6.0 * s, rect.y + 6.0 * s, 7.0 * s, 0xef_44_44, 1.0);
+        } else if self.unread {
+            canvas.circle(rect.x + rect.w - 6.0 * s, rect.y + 6.0 * s, 7.0 * s, WHITE, 1.0);
+            canvas.circle(rect.x + rect.w - 6.0 * s, rect.y + 6.0 * s, 5.0 * s, BLUE, 1.0);
         }
     }
 
@@ -471,6 +533,17 @@ impl Overlay {
         let y = badge.y + (badge.h - text.line_height(size)) / 2.0 + 1.0 * s;
         text.draw(canvas, badge.x + 14.0 * s, y, label, size, WHITE);
     }
+}
+
+/// Model text as plain text: the bubble shows no Markdown, so its marks go.
+fn plain(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let line = line.trim_start_matches('#').trim_start_matches(' ');
+            line.replace("**", "").replace("__", "").replace('`', "")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn state_label(state: State) -> &'static str {
@@ -521,7 +594,11 @@ mod tests {
         painted(&mut overlay);
         let hits: Vec<Hit> = overlay.hits.iter().map(|(_, hit)| *hit).collect();
         assert!(hits.contains(&Hit::Input));
-        assert!(hits.contains(&Hit::Approve) && hits.contains(&Hit::Decline));
+        // Clicking a button inside the bubble is that button, not the bubble.
+        for wanted in [Hit::Approve, Hit::Decline, Hit::Input] {
+            let rect = overlay.hits.iter().find(|(_, hit)| *hit == wanted).unwrap().0;
+            assert_eq!(overlay.hit(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0), Some(wanted));
+        }
         overlay.toggle();
         painted(&mut overlay);
         assert_eq!(overlay.hits.len(), 1, "only the character while hidden");
@@ -534,6 +611,7 @@ mod tests {
     #[test]
     fn the_character_can_be_moved_and_stays_in_the_window() {
         let mut overlay = Overlay::new(Text::load(), "api.anthropic.com");
+        overlay.toggle();
         overlay.set_corner((1000.0, 600.0));
         painted(&mut overlay);
         let avatar = hit_kinds(&overlay).into_iter().find(|(_, hit)| *hit == Hit::Avatar).unwrap().0;
@@ -551,6 +629,43 @@ mod tests {
             assert!(input.x > avatar.x + avatar.w);
             assert!(panel.y > input.y);
         }
+    }
+
+    #[test]
+    fn the_bubble_starts_hidden_and_opens_when_the_person_is_needed() {
+        let mut overlay = Overlay::new(None, "api.anthropic.com");
+        assert!(!overlay.expanded);
+        overlay.say("**Done**: opened `Notepad`".into());
+        assert!(overlay.unread && !overlay.expanded, "a reply only marks the character");
+        assert_eq!(overlay.messages.back().unwrap().1, "Done: opened Notepad", "no Markdown marks");
+        overlay.propose(vec![("클릭".into(), None)]);
+        assert!(overlay.expanded && !overlay.unread, "approval opens the bubble");
+        overlay.toggle();
+        overlay.notice("오류: 연결 실패".into());
+        assert!(overlay.expanded, "errors open the bubble");
+    }
+
+    #[test]
+    fn a_long_conversation_scrolls_back_and_returns_on_new_lines() {
+        let mut overlay = Overlay::new(Text::load(), "api.anthropic.com");
+        if overlay.text.is_none() {
+            return;
+        }
+        overlay.toggle();
+        for index in 0..40 {
+            overlay.say(format!("line {index}"));
+        }
+        painted(&mut overlay);
+        assert!(overlay.max_scroll > 0, "not everything fits");
+        overlay.scroll_by(5);
+        assert_eq!(overlay.scroll, 5);
+        overlay.scroll_by(1000);
+        assert_eq!(overlay.scroll, overlay.max_scroll, "no further than the first line");
+        overlay.scroll_by(-1000);
+        assert_eq!(overlay.scroll, 0);
+        overlay.scroll_by(3);
+        overlay.say("new".into());
+        assert_eq!(overlay.scroll, 0, "new lines bring the newest into view");
     }
 
     #[test]

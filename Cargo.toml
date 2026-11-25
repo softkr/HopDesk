@@ -59,6 +59,8 @@ rfd = "0.18"
 # pick a process default and every RDP connection panics.
 image = { version = "0.25", default-features = false, features = ["png"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots-no-provider", "http2", "system-proxy", "json"] }
+# Checking the address of an AI server (already in the tree through reqwest)
+url = "2"
 # The process-wide crypto provider reqwest needs installed (aws-lc-rs, as IronRDP's TLS uses)
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 ironrdp-input = { path = "third_party/IronRDP/crates/ironrdp-input" }

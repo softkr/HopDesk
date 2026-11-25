@@ -12,7 +12,7 @@ use ironrdp_client::rdp::{RdpInputEvent, RdpInputSender};
 use ironrdp_viewer::app::{App, OverlayPainter};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
-use winit::event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, NamedKey};
 
@@ -20,11 +20,13 @@ use super::SessionEvent;
 use super::agent_input::AgentDriver;
 use super::canvas::Text;
 use super::overlay::{Hit, Overlay};
-use crate::agent::action::{Action, Coordinates, Point};
+use crate::agent::action::{Action, Point};
 use crate::agent::capture::Pixels;
-use crate::agent::provider::claude::Claude;
-use crate::agent::{self, Command, Event, Options, Remote, State};
+use crate::agent::{self, Command, Event, Options, Remote, State, provider};
 
+/// Bubble lines per wheel notch, and trackpad points per line.
+const LINES_PER_NOTCH: f32 = 3.0;
+const PIXELS_PER_LINE: f32 = 20.0;
 /// How far the pointer moves (physical pixels) before pressing the character drags it.
 const DRAG_THRESHOLD: f32 = 4.0;
 /// Fast-path input events per message, within the PDU header's count.
@@ -48,6 +50,8 @@ pub(super) struct Assistant {
     drag: Option<((f32, f32), (f32, f32), bool)>,
     /// The input method composes text (macOS sends typed text as commits then).
     ime_active: bool,
+    /// Wheel movement over the bubble not yet amounting to a line.
+    wheel: f32,
 }
 
 /// Starts the assistant when it is turned on in the settings and an API key is stored; `None`
@@ -62,10 +66,12 @@ pub(super) fn start(
         info!("AI assistant is off (HopDesk settings)");
         return None;
     }
-    let key = match crate::secret_store::get(agent::API_KEY_ACCOUNT) {
+    let key = match crate::secret_store::get(settings.kind.key_account()) {
         Ok(Some(key)) if !key.trim().is_empty() => key.trim().to_owned(),
+        // A compatible server may run without a key.
+        Ok(_) if !settings.kind.needs_key() => String::new(),
         Ok(_) => {
-            warn!("AI assistant is on but no API key is stored; the session runs without it");
+            warn!(provider = ?settings.kind, "AI assistant is on but no API key is stored; the session runs without it");
             return None;
         }
         Err(error) => {
@@ -73,8 +79,7 @@ pub(super) fn start(
             return None;
         }
     };
-    let model = settings.model;
-    let provider = match Claude::new(key, model.clone()) {
+    let provider = match provider::build(&settings, key) {
         Ok(provider) => provider,
         Err(error) => {
             warn!(error = %format!("{error:#}"), "AI assistant unavailable");
@@ -85,7 +90,7 @@ pub(super) fn start(
     if text.is_none() {
         warn!("No UI font found; the assistant shows no text");
     }
-    let overlay = Rc::new(RefCell::new(Overlay::new(text, "Anthropic API (api.anthropic.com)")));
+    let overlay = Rc::new(RefCell::new(Overlay::new(text, &provider::destination(&settings))));
     let painter = {
         let overlay = Rc::clone(&overlay);
         Box::new(move |pixels: &mut [u32], width: usize, height: usize| {
@@ -106,10 +111,10 @@ pub(super) fn start(
     };
     let options = Options {
         approve: true,
-        coordinates: Coordinates::Pixels,
+        coordinates: provider::coordinates(&settings),
     };
     runtime.spawn(agent::run(provider, remote, receiver, Arc::clone(&taken_over), emit, options));
-    info!(%model, "AI assistant ready");
+    info!(provider = ?settings.kind, model = %settings.model, "AI assistant ready");
     let assistant = Assistant {
         overlay,
         commands,
@@ -118,6 +123,7 @@ pub(super) fn start(
         swallow_release: false,
         drag: None,
         ime_active: false,
+        wheel: 0.0,
     };
     Some((assistant, painter))
 }
@@ -167,6 +173,10 @@ impl Assistant {
                 }
                 true
             }
+            WindowEvent::MouseWheel { delta, .. } if self.overlay.borrow().hit(self.cursor.0, self.cursor.1) == Some(Hit::Panel) => {
+                self.scroll_bubble(*delta);
+                true
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 ..
@@ -201,6 +211,20 @@ impl Assistant {
             redraw(app);
         }
         consumed
+    }
+
+    /// Scrolls the conversation in the bubble: up shows older lines.
+    fn scroll_bubble(&mut self, delta: MouseScrollDelta) {
+        let mut overlay = self.overlay.borrow_mut();
+        self.wheel += match delta {
+            MouseScrollDelta::LineDelta(_, y) => y * LINES_PER_NOTCH,
+            #[expect(clippy::cast_possible_truncation, reason = "a scroll distance")]
+            MouseScrollDelta::PixelDelta(position) => position.y as f32 / (PIXELS_PER_LINE * overlay.scale()),
+        };
+        let whole = self.wheel.trunc();
+        self.wheel -= whole;
+        #[expect(clippy::cast_possible_truncation, reason = "a few lines")]
+        overlay.scroll_by(whole as i32);
     }
 
     /// Moves the character while it is dragged; `true` keeps the pointer move from the session.

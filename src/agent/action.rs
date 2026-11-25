@@ -111,13 +111,14 @@ pub enum Action {
 }
 
 /// How a model gives positions on the screenshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Coordinates {
     /// Screenshot pixels (Claude, GPT).
     #[default]
     Pixels,
-    /// 0 to [`NORMALIZED_RANGE`] across each side, whatever the screenshot size.
-    #[cfg_attr(not(test), expect(dead_code, reason = "for models that give normalized positions"))]
+    /// 0 to [`NORMALIZED_RANGE`] across each side, whatever the screenshot size (Gemini, some
+    /// open models).
     Normalized,
 }
 

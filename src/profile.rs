@@ -209,16 +209,28 @@ pub struct ProfileStore {
 pub struct AiSettings {
     #[serde(default)]
     pub enabled: bool,
-    /// Model ID at the provider.
+    /// Who runs the model.
+    #[serde(default)]
+    pub kind: crate::agent::provider::Kind,
+    /// Model ID at the provider; empty uses the provider's default.
     #[serde(default = "default_ai_model")]
     pub model: String,
+    /// Address of a compatible server (open models).
+    #[serde(default)]
+    pub base_url: String,
+    /// How a compatible server's model gives positions.
+    #[serde(default)]
+    pub coordinates: crate::agent::action::Coordinates,
 }
 
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            kind: crate::agent::provider::Kind::default(),
             model: default_ai_model(),
+            base_url: String::new(),
+            coordinates: crate::agent::action::Coordinates::default(),
         }
     }
 }
@@ -336,6 +348,17 @@ mod tests {
         jump = { host = "bastion", port = 22, user = "me" }
         target = { host = "10.0.0.5", port = 3389, user = "Administrator" }
     "#;
+
+    #[test]
+    fn earlier_ai_settings_still_load() {
+        let store: ProfileStore = toml::from_str("[ai]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n").unwrap();
+        assert!(store.ai().enabled);
+        assert_eq!(store.ai().kind, crate::agent::provider::Kind::Anthropic);
+        assert_eq!(store.ai().model, "claude-sonnet-5-5");
+        let saved = toml::to_string(&store).unwrap();
+        let again: ProfileStore = toml::from_str(&saved).unwrap();
+        assert_eq!(again.ai(), store.ai());
+    }
 
     #[test]
     fn profile_without_display_opens_fullscreen() {
