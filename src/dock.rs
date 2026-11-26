@@ -21,13 +21,19 @@ pub fn mark_session(profile_name: &str) {
     app.dockTile().setBadgeLabel(Some(&NSString::from_str(&badge(profile_name))));
 }
 
+/// How long a session lives on after leaving the Dock. The Dock drops the tile only if it handles
+/// the change before the process dies; a session that exits a few milliseconds later stays behind
+/// as a "recent app" tile.
+const DOCK_LEAVE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Removes the session's Dock tile as the session ends, so the Dock does not keep the session as
-/// a second "recent app" next to the launcher.
+/// a second "recent app" next to the launcher. Blocks for `DOCK_LEAVE_GRACE`, so call it last.
 pub fn leave_dock() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
     NSApplication::sharedApplication(mtm).setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+    std::thread::sleep(DOCK_LEAVE_GRACE);
 }
 
 /// Quits the session when the launcher stops it (SIGTERM), leaving the Dock first like a session
